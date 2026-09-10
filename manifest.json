@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "id": "ninepointlabs.fastmail",
+  "name": "Fastmail",
+  "version": "0.1.0",
+  "author": "Ninepoint Labs",
+  "license": "MIT",
+  "description": "Unread email from your Fastmail Inbox and the folders your rules file into, live over JMAP push, with new-mail notifications \u2014 through fm-cli.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Fastmail",
+    "description": "Unread count and recent email from Fastmail across linked accounts and folders, updated as it changes.",
+    "category": "Communication",
+    "aliases": [
+      "fastmail",
+      "email",
+      "mail"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "notify": false,
+      "openAction": "tui",
+      "folders": "all",
+      "excludeFolders": ""
+    },
+    "schema": [
+      {
+        "key": "notify",
+        "type": "boolean",
+        "label": "Notifications",
+        "defaultValue": false
+      },
+      {
+        "key": "openAction",
+        "type": "enum",
+        "label": "Open emails in",
+        "options": [
+          "app",
+          "tui",
+          "browser"
+        ],
+        "defaultValue": "tui"
+      },
+      {
+        "key": "folders",
+        "type": "enum",
+        "label": "Folders",
+        "options": [
+          "all",
+          "inbox"
+        ],
+        "defaultValue": "all",
+        "description": "all: the newest Inbox threads plus unseen email from every other folder (shown in the panel as All folders). inbox: the Inbox only (Inbox only)."
+      },
+      {
+        "key": "excludeFolders",
+        "type": "string",
+        "label": "Exclude folders",
+        "defaultValue": "",
+        "description": "Comma-separated folder names or paths left out of the all view, such as Newsletters, Other Services/Gmail. Junk, Trash, Drafts, Sent, Snoozed, Scheduled and Archive are always left out."
+      }
+    ]
+  }
+}

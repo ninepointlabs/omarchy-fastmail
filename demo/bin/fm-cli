@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+# A fake fm-cli for demo mode and tests. It implements only the commands the
+# plugin runs, in the shapes docs/omarchy-contract.md of fm-cli describes, and
+# never contacts Fastmail. Adapted from 37signals' HEY plugin for Omarchy under
+# the MIT terms in THIRD_PARTY_NOTICES.md.
+
+import json
+import os
+import signal
+import stat
+import sys
+import time
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+VERSION = "0.3.0"
+WEB_URL = "https://app.fastmail.com"
+WATCH_EVENTS = "added,updated,deleted,new,resync"
+
+
+def fail(message, code="usage", exit_code=1):
+    print(json.dumps({"ok": False, "error": message, "code": code}), file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def succeed(data, summary=""):
+    print(json.dumps({"ok": True, "data": data, "summary": summary}))
+
+
+def option(args, name, fallback=None):
+    try:
+        return args[args.index(name) + 1]
+    except (ValueError, IndexError):
+        if fallback is not None:
+            return fallback
+        fail(f"Missing required option: {name}")
+
+
+def load_fixture():
+    default = Path(__file__).resolve().parent.parent / "fixtures" / "screenshot.json"
+    path = Path(os.environ.get("FM_DEMO_FIXTURE", default))
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"Could not load demo fixture {path}: {error}", code="cli")
+
+
+def state_path():
+    # State lives in the caller's private runtime directory, never a shared
+    # /tmp name another user could pre-create.
+    configured = os.environ.get("FM_DEMO_STATE_DIR")
+    if configured:
+        directory = Path(configured)
+    else:
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if not runtime:
+            fail("FM_DEMO_STATE_DIR or XDG_RUNTIME_DIR is required for demo state")
+        directory = Path(runtime) / "omarchy-fm-demo"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    info = directory.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        fail(f"Demo state directory {directory} is not a private directory")
+    if info.st_mode & 0o077:
+        directory.chmod(0o700)
+    return directory / "state.json"
+
+
+def load_state():
+    path = state_path()
+    if not path.exists():
+        return {"seen_ids": []}
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"Could not load demo state: {error}", code="cli")
+
+
+def save_state(state):
+    path = state_path()
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state))
+    temporary.replace(path)
+
+
+def primary_account(fixture):
+    accounts = fixture["accounts"]
+    for account in accounts:
+        if account.get("active"):
+            return account
+    return accounts[0]
+
+
+def rendered_posting(source, seen, now):
+    posting = deepcopy(source)
+    minutes_ago = int(posting.pop("minutes_ago"))
+    posting.pop("state", None)
+    timestamp = now - timedelta(minutes=minutes_ago)
+    posting["active_at"] = timestamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    posting["seen"] = seen
+    if seen:
+        posting["unseen_count"] = 0
+    posting.setdefault("thread_id", posting["id"])
+    posting.setdefault("flagged", False)
+    posting.setdefault("alternative_sender_name", "")
+    # The demo never opens a real Fastmail URL: an empty app_url sends web
+    # destinations to the Inbox fallback.
+    posting["app_url"] = ""
+    return posting
+
+
+def auth_status(fixture):
+    account = primary_account(fixture)
+    succeed({
+        "authenticated": True,
+        "auth_type": "oauth",
+        "username": account["email"],
+        "expires_at": "2099-01-01T00:00:00Z",
+        "refresh_available": True,
+        "storage": "keyring",
+        "base_url": "https://api.fastmail.com",
+    }, f"Signed in as {account['email']}")
+
+
+def list_accounts(fixture):
+    accounts = fixture["accounts"]
+    succeed(accounts, f"{len(accounts)} mail accounts")
+
+
+ALWAYS_EXCLUDED_KINDS = {"junk", "trash", "drafts", "sent", "snoozed", "scheduled", "archive"}
+
+
+def folder_excluded(folder, excludes):
+    """The CLI's rule: a folder is out by role, or when an --exclude entry names
+    its id, role, name, or path (case-insensitively); a parent's children go
+    with it."""
+    if folder.get("kind", "") in ALWAYS_EXCLUDED_KINDS:
+        return True
+    wanted = {entry.strip().lower() for entry in excludes}
+    path = folder.get("path", folder["name"])
+    if {folder["id"].lower(), folder["name"].lower(), path.lower()} & wanted:
+        return True
+    if folder.get("kind") and folder["kind"].lower() in wanted:
+        return True
+    return any(path.lower().startswith(entry + "/") for entry in wanted if entry)
+
+
+def rendered_folder(folder, postings):
+    unread = sum(1 for item in postings if item["box_id"] == folder["id"] and not item["seen"])
+    return {
+        "id": folder["id"],
+        "kind": folder.get("kind", ""),
+        "name": folder["name"],
+        "account_id": folder["account_id"],
+        "app_url": WEB_URL + "/mail/" + folder["name"].replace(" ", "%20"),
+        "unread_count": unread,
+        "total_count": int(folder.get("total_count", 0)),
+    }
+
+
+def view_box(fixture, box, excludes, args):
+    """`box view inbox` is the Inbox alone; `box view all` is the Inbox plus
+    every unseen thread from every other included folder, with a `folders`
+    array for the chips — the shapes docs/omarchy-contract.md describes."""
+    selected = option(args, "--account", "all")
+    limit = int(option(args, "--limit", "50"))
+    seen_ids = {str(value) for value in load_state().get("seen_ids", [])}
+    now = datetime.now(timezone.utc)
+
+    folders = [folder for folder in fixture["folders"]
+               if selected == "all" or str(folder["account_id"]) == str(selected)]
+    if box == "inbox":
+        folders = [folder for folder in folders if folder.get("kind") == "inbox"]
+    else:
+        folders = [folder for folder in folders if not folder_excluded(folder, excludes)]
+    included = {folder["id"] for folder in folders}
+
+    postings = []
+    for source in fixture["postings"]:
+        if source["box_id"] not in included:
+            continue
+        seen = str(source["id"]) in seen_ids or source.get("state") == "seen"
+        # Only the Inbox contributes seen threads to the all box; every other
+        # folder is there for its unseen mail.
+        if source["box_kind"] != "inbox" and seen:
+            continue
+        postings.append(rendered_posting(source, seen, now))
+    postings.sort(key=lambda item: item["active_at"], reverse=True)
+    unread = sum(1 for item in postings if not item["seen"])
+    rendered_folders = [rendered_folder(folder, postings) for folder in folders]
+    # A folder other than the Inbox is listed only while it has unseen mail.
+    rendered_folders = [folder for folder in rendered_folders if folder["kind"] == "inbox" or folder["unread_count"] > 0]
+    inbox_total = sum(folder["total_count"] for folder in rendered_folders if folder["kind"] == "inbox")
+    account_id = primary_account(fixture)["id"] if selected == "all" else selected
+
+    if box == "inbox":
+        succeed({
+            "id": "P-F",
+            "kind": "inbox",
+            "name": "Inbox",
+            "account_id": account_id,
+            "app_url": WEB_URL + "/mail/Inbox",
+            "unread_count": unread,
+            "total_count": len(postings),
+            "folders": rendered_folders,
+            "postings": postings[:limit],
+        }, f"{unread} unread in Inbox")
+        return
+    succeed({
+        "id": "all",
+        "kind": "all",
+        "name": "All folders",
+        "account_id": account_id,
+        "app_url": WEB_URL + "/mail/Inbox",
+        "unread_count": unread,
+        "total_count": inbox_total,
+        "folders": rendered_folders,
+        "postings": postings[:limit],
+    }, f"{unread} unread across {len(rendered_folders)} folders")
+
+
+def box_view_request(args):
+    """Recognizes the box reads the plugin runs — `box view <inbox|all>` with
+    the fixed limit, optionally `--account all`, and for `all` any number of
+    `--exclude FOLDER` pairs — and returns (box, excludes, remaining args), or
+    None for anything else."""
+    if len(args) < 3 or args[:2] != ["box", "view"] or args[2] not in ("inbox", "all"):
+        return None
+    excludes = []
+    remaining = []
+    rest = args[3:]
+    index = 0
+    while index < len(rest):
+        if rest[index] == "--exclude":
+            if index + 1 >= len(rest) or rest[index + 1].startswith("-"):
+                return None
+            excludes.append(rest[index + 1])
+            index += 2
+            continue
+        remaining.append(rest[index])
+        index += 1
+    if remaining not in (["--limit", "50", "--json"], ["--account", "all", "--limit", "50", "--json"]):
+        return None
+    if args[2] == "inbox" and excludes:
+        return None
+    return args[2], excludes, remaining
+
+
+def mark_seen(fixture, args):
+    posting_id = str(args[1])
+    account_id = str(args[3])
+    if not any(str(item["id"]) == posting_id and str(item["account_id"]) == account_id
+               for item in fixture["postings"]):
+        fail(f"Unknown demo posting: {posting_id}", code="remote")
+    state = load_state()
+    seen_ids = {str(value) for value in state.get("seen_ids", [])}
+    seen_ids.add(posting_id)
+    state["seen_ids"] = sorted(seen_ids)
+    save_state(state)
+    succeed({"ids": [posting_id], "seen": True}, "Marked 1 thread as seen")
+
+
+def watch():
+    def stop(_signum, _frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    print(json.dumps({"change": "ready"}), flush=True)
+    while True:
+        time.sleep(3600)
+
+
+def opaque_id(value):
+    return value != "" and value != "all" and not value.startswith("-")
+
+
+def valid_tui_command(args):
+    if not args:
+        return True
+    if args[0] != "tui":
+        return False
+    rest = args[1:]
+    seen = set()
+    index = 0
+    while index < len(rest):
+        flag = rest[index]
+        if flag == "--remote":
+            if flag in seen:
+                return False
+            seen.add(flag)
+            index += 1
+            continue
+        if flag not in ("--thread", "--email") or flag in seen or index + 1 >= len(rest) or not opaque_id(rest[index + 1]):
+            return False
+        seen.add(flag)
+        index += 2
+    if "--remote" in seen and not ({"--thread", "--email"} & seen):
+        return False
+    return True
+
+
+def main():
+    fixture = load_fixture()
+    args = sys.argv[1:]
+
+    # FM_DEMO_STATE picks the setup state the panel sees: "ready" (default),
+    # "missing" (no CLI on PATH, from the probe's point of view) or
+    # "signed-out". Screenshots of the first-run flow use the last two.
+    state = os.environ.get("FM_DEMO_STATE", "ready")
+    if args in (["--version"], ["version"]):
+        if state == "missing":
+            print("missing")
+        else:
+            print(f"fm-cli version {VERSION}")
+    elif args == ["auth", "status", "--json"]:
+        if state == "missing":
+            return
+        if state == "signed-out":
+            succeed({"authenticated": False, "auth_type": "none", "username": "", "expires_at": None,
+                     "refresh_available": False, "storage": "keyring", "base_url": "https://api.fastmail.com"},
+                    "Not signed in")
+            return
+        auth_status(fixture)
+    elif args == ["setup", "--silent-success"]:
+        # Already signed in: --silent-success prints nothing.
+        return
+    elif args == ["account", "list", "--json"]:
+        list_accounts(fixture)
+    elif box_view_request(args) is not None:
+        box, excludes, remaining = box_view_request(args)
+        view_box(fixture, box, excludes, remaining)
+    elif (len(args) == 5 and args[0] == "seen" and opaque_id(args[1])
+          and args[2] == "--account" and opaque_id(args[3]) and args[4] == "--json"):
+        mark_seen(fixture, args)
+    elif args == ["--account", "all", "watch", "--events", WATCH_EVENTS]:
+        watch()
+    elif valid_tui_command(args):
+        # --remote means "hand off to a running TUI"; the demo has none.
+        raise SystemExit(1 if "--remote" in args else 0)
+    else:
+        fail("Unsupported demo fm-cli command: " + " ".join(args))
+
+
+if __name__ == "__main__":
+    main()
