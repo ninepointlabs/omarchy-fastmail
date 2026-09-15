@@ -47,28 +47,31 @@ TestCase {
     service = null
   }
 
+  // Every process the service starts: a fixed interpreter running the
+  // plugin's supervisor with its caps and deadline, and the inherited
+  // environment replaced by a closed one.
   function processCommand(process) {
     var raw = process.command
     var payload = Model.capturedCommandPayload(raw)
-    var setupLock = JSON.stringify(raw) === JSON.stringify(Model.setupLockCheckCommand())
-    if (!setupLock && payload.length > 0 && (payload[0] === "fm-cli" || payload[0] === "setpriv"
-        || payload[0] === "omarchy-notification-send"
-        || (payload[0] === "bash" && String(payload[2] || "").indexOf("fm-cli") !== -1))) {
-      verify(raw.length > payload.length, "fm-cli command has a producer-side output guard")
-      compare(raw[0], "setpriv")
-      compare(raw[1], "--pdeathsig")
-      compare(raw[2], "TERM")
-      compare(raw[3], "bash")
-      compare(raw[4], "-o")
-      compare(raw[5], "pipefail")
-      compare(raw[6], "-c")
-      compare(raw[8], "fm-output-guard")
-      verify(Number(raw[9]) > 0)
-      verify(Number(raw[10]) > 0)
-      verify(Number(raw[11]) >= 0)
+    if (raw.length > 0) {
+      verify(Model.pythonCandidates.indexOf(raw[0]) !== -1, "starts from a fixed python3: " + raw[0])
+      compare(raw.slice(1, 4), ["-I", "-S", "-B"])
+      compare(raw[4], service.runtime.supervisor)
+      compare(raw[5], "--stdout-cap")
+      verify(Number(raw[6]) > 0)
+      compare(raw[7], "--stderr-cap")
+      verify(Number(raw[8]) > 0)
+      compare(raw[9], "--deadline")
+      compare(raw[11], "--grace")
       verify(Number(raw[12]) > 0)
-      if (payload[0] === "setpriv" && payload.indexOf("watch") !== -1) compare(Number(raw[11]), 0)
-      else verify(Number(raw[11]) > 0)
+      compare(raw[13], "--")
+      if (payload[0] === "fm-cli" && payload.indexOf("watch") !== -1) compare(Number(raw[10]), 0)
+      else verify(Number(raw[10]) > 0)
+      compare(process.clearEnvironment, true)
+      verify(process.environment.PATH === Model.trustedPathEnvironment
+        || process.environment.PATH === Model.trustedSessionPathEnvironment, process.environment.PATH)
+      compare(process.environment.BASH_ENV, undefined)
+      compare(process.environment.LD_PRELOAD, undefined)
     }
     return payload
   }
@@ -77,8 +80,7 @@ TestCase {
     for (var i = 0; i < ProcessRegistry.processes.length; i++) {
       var process = ProcessRegistry.processes[i]
       var command = processCommand(process)
-      if (command.length > 2 && command[0] === "bash" && command[1] === "-c"
-          && String(command[2]).indexOf("command -v fm-cli") !== -1) return process
+      if (command.length === 2 && command[0] === "fm-cli-run" && command[1] === "probe") return process
     }
     return null
   }
@@ -92,8 +94,17 @@ TestCase {
     return null
   }
 
-  readonly property string signedInProbe: 'fm-cli version 0.3.0\n{"ok":true,"data":{"authenticated":true,"auth_type":"oauth","username":"tim@example.com"}}'
-  readonly property string signedOutProbe: 'fm-cli version 0.3.0\n{"ok":true,"data":{"authenticated":false,"auth_type":"none","username":""}}'
+  // What `fm-cli-run probe` prints for a verified CLI: the trusted helpers,
+  // the identity, the version, the auth status.
+  readonly property string probeTools: 'tools {"omarchy-launch-floating-terminal-with-presentation":"/usr/bin/omarchy-launch-floating-terminal-with-presentation","omarchy-launch-webapp":"/usr/bin/omarchy-launch-webapp","omarchy-notification-send":"/usr/bin/omarchy-notification-send","wl-copy":"/usr/bin/wl-copy","xdg-open":"/usr/bin/xdg-open"}\n'
+  readonly property string probeIdentity: 'identity {"path":"/home/tester/.local/share/mise/installs/github-ninepointlabs-fm-cli/0.3.0/fm-cli","source":"mise"}\n'
+  readonly property string signedInProbe: probeTools + probeIdentity + 'fm-cli version 0.3.0\n{"ok":true,"data":{"authenticated":true,"auth_type":"oauth","username":"tim@example.com"}}'
+  readonly property string signedOutProbe: probeTools + probeIdentity + 'fm-cli version 0.3.0\n{"ok":true,"data":{"authenticated":false,"auth_type":"none","username":""}}'
+  readonly property var trustedTools: ({
+    "omarchy-launch-webapp": "/usr/bin/omarchy-launch-webapp",
+    "omarchy-notification-send": "/usr/bin/omarchy-notification-send",
+    "xdg-open": "/usr/bin/xdg-open"
+  })
   readonly property string oneAccount: '{"ok":true,"data":[{"id":"u12345678","name":"tim@example.com","email":"tim@example.com","active":true}],"summary":"1 mail account"}'
   readonly property string emptyInbox: '{"ok":true,"data":{"id":"P-F","kind":"inbox","name":"Inbox","account_id":"u12345678","unread_count":0,"total_count":0,"postings":[]}}'
 
@@ -128,7 +139,7 @@ TestCase {
     for (var i = 0; i < ProcessRegistry.processes.length; i++) {
       var process = ProcessRegistry.processes[i]
       var command = processCommand(process)
-      if (command.length > 0 && command[0] === "setpriv") return process
+      if (command.length > 0 && command[0] === "fm-cli" && command.indexOf("watch") !== -1) return process
     }
     return null
   }
@@ -137,7 +148,7 @@ TestCase {
     for (var i = 0; i < ProcessRegistry.processes.length; i++) {
       var process = ProcessRegistry.processes[i]
       var command = processCommand(process)
-      if (command.length > 0 && command[0] === "omarchy-notification-send") return process
+      if (command.length > 0 && command[0] === "/usr/bin/omarchy-notification-send") return process
     }
     return null
   }
@@ -157,7 +168,7 @@ TestCase {
 
 
   function findSetupLockProcess() {
-    var expected = JSON.stringify(Model.setupLockCheckCommand())
+    var expected = JSON.stringify(Model.setupLockCheckCommand(service.runtime))
     for (var i = 0; i < ProcessRegistry.processes.length; i++) {
       var process = ProcessRegistry.processes[i]
       if (JSON.stringify(process.command) === expected) return process
@@ -234,7 +245,7 @@ TestCase {
 
     var process = findSetupLockProcess()
     verify(process !== null)
-    compare(process.command, Model.setupLockCheckCommand())
+    compare(processCommand(process), ["fm-cli-run", "setup-lock-check"])
     verify(!service.tryStartSetup())
 
     process.complete(0, "", "")
@@ -402,7 +413,7 @@ TestCase {
     var watch = findWatchProcess()
     verify(watch !== null)
     verify(watch.running)
-    compare(processCommand(watch), ["setpriv", "--pdeathsig", "TERM", "fm-cli", "--account", "all", "watch", "--events", "added,updated,deleted,new,resync"])
+    compare(processCommand(watch), ["fm-cli", "--account", "all", "watch", "--events", "added,updated,deleted,new,resync"])
     compare(service.watching, true)
     // Alive is not the same as live: the watch has not said ready.
     compare(service.connected, false)
@@ -581,7 +592,7 @@ TestCase {
   function test_a_new_inbox_line_is_a_toast_from_the_plugin() {
     settleNotifying()
     var watch = findWatchProcess()
-    compare(processCommand(watch), ["setpriv", "--pdeathsig", "TERM", "fm-cli", "--account", "all", "watch", "--events", "added,updated,deleted,new,resync"])
+    compare(processCommand(watch), ["fm-cli", "--account", "all", "watch", "--events", "added,updated,deleted,new,resync"])
 
     watch.emitLine(newLunchLine)
     tick()
@@ -589,15 +600,16 @@ TestCase {
     verify(toast !== null)
     verify(toast.running)
     compare(processCommand(toast), [
-      "omarchy-notification-send",
+      "/usr/bin/omarchy-notification-send",
       "--app-name", "Fastmail",
       "-u", "low",
       "-i", "mail-unread",
       "-p",
       "Fastmail\nLunch on Thursday?",
       "Are you free around noon?",
-      "--exec", "bash", "-c", Model.tuiOpenShell("AB5kIMdwqots", "StmlKEsTVdXB")
-    ])
+      "--exec"
+    ].concat(Model.tuiOpenCommand(service.runtime, "AB5kIMdwqots", "StmlKEsTVdXB")))
+    compare(toast.environment.PATH, Model.trustedSessionPathEnvironment)
     // The line is a wake-up too, as every line is.
     compare(service.refreshing, true)
   }
@@ -777,18 +789,27 @@ TestCase {
     compare(service.openAction, "tui")
   }
 
+  // A detached launch: the closed session environment, nothing inherited.
+  function verifyDetachedContext(index) {
+    var context = Quickshell.detachedContexts[index]
+    compare(context.clearEnvironment, true)
+    compare(context.environment.PATH, Model.trustedSessionPathEnvironment)
+    compare(context.environment.HOME, "/home/tester")
+    compare(context.environment.WAYLAND_DISPLAY, "wayland-1")
+    compare(context.environment.BASH_ENV, undefined)
+    compare(context.environment.LD_PRELOAD, undefined)
+  }
+
   function test_email_click_opens_the_thread_in_the_tui() {
     service.settings = { openAction: "tui" }
     service.openNotification({ id: "AB5kIMdwqots", emailId: "StmlKEsTVdXB", accountId: "u12345678", title: "Lunch on Thursday?", url: "https://app.fastmail.com/mail/Inbox/TAB5kIMdwqots", unread: false })
 
-    // A running TUI is handed the thread first; then it is raised, or a new
-    // TUI starts on that thread.
-    compare(Quickshell.detachedCommands.length, 2)
-    compare(Quickshell.detachedCommands[0],
-      ["fm-cli", "tui", "--thread", "AB5kIMdwqots", "--email", "StmlKEsTVdXB", "--remote"])
-    compare(Quickshell.detachedCommands[1],
-      ["omarchy-launch-or-focus", "com.ninepointlabs.fm-cli",
-        "'omarchy-launch-tui' '--app-id=com.ninepointlabs.fm-cli' 'fm-cli' 'tui' '--thread' 'AB5kIMdwqots' '--email' 'StmlKEsTVdXB'"])
+    // The runner hands the thread to a running TUI, then raises it or starts
+    // a new one on that thread.
+    compare(Quickshell.detachedCommands.length, 1)
+    compare(Quickshell.detachedCommands[0], [service.runtime.python, "-I", "-S", "-B", service.runtime.runner,
+      "open-tui", "--thread", "AB5kIMdwqots", "--email", "StmlKEsTVdXB"])
+    verifyDetachedContext(0)
   }
 
   function test_email_click_without_ids_just_focuses_the_tui() {
@@ -796,25 +817,51 @@ TestCase {
     service.openNotification({ id: "", url: "https://app.fastmail.com/mail/Inbox", unread: false })
 
     compare(Quickshell.detachedCommands.length, 1)
-    compare(Quickshell.detachedCommands[0],
-      ["omarchy-launch-or-focus", "com.ninepointlabs.fm-cli", "'omarchy-launch-tui' '--app-id=com.ninepointlabs.fm-cli' 'fm-cli' 'tui'"])
+    compare(Quickshell.detachedCommands[0], [service.runtime.python, "-I", "-S", "-B", service.runtime.runner, "open-tui"])
+  }
+
+  function test_email_click_never_passes_a_malformed_id() {
+    service.settings = { openAction: "tui" }
+    service.openNotification({ id: "$(touch /tmp/x)", emailId: "-rf", url: "", unread: false })
+    compare(Quickshell.detachedCommands[0], [service.runtime.python, "-I", "-S", "-B", service.runtime.runner, "open-tui"])
   }
 
   function test_email_click_can_open_its_thread_in_the_fastmail_app() {
+    service.tools = trustedTools
     service.settings = { openAction: "app" }
     service.openNotification({ id: "AB5kIMdwqots", accountId: "u12345678", title: "Lunch on Thursday?", url: "https://app.fastmail.com/mail/Inbox/TAB5kIMdwqots", unread: false })
 
     compare(Quickshell.detachedCommands.length, 1)
     compare(Quickshell.detachedCommands[0],
-      ["omarchy-launch-webapp", "https://app.fastmail.com/mail/Inbox/TAB5kIMdwqots"])
+      ["/usr/bin/omarchy-launch-webapp", "https://app.fastmail.com/mail/Inbox/TAB5kIMdwqots"])
+    verifyDetachedContext(0)
   }
 
   function test_email_click_in_the_app_falls_back_to_the_inbox_for_a_foreign_url() {
+    service.tools = trustedTools
     service.settings = { openAction: "app" }
     service.openNotification({ id: "AB5kIMdwqots", url: "https://example.com/phish", unread: false })
 
     compare(Quickshell.detachedCommands[0],
-      ["omarchy-launch-webapp", "https://app.fastmail.com/mail/Inbox"])
+      ["/usr/bin/omarchy-launch-webapp", "https://app.fastmail.com/mail/Inbox"])
+  }
+
+  function test_email_click_in_the_browser_uses_the_resolved_xdg_open() {
+    service.tools = trustedTools
+    service.settings = { openAction: "browser" }
+    service.openNotification({ id: "AB5kIMdwqots", url: "https://app.fastmail.com/mail/Inbox/TAB5kIMdwqots", unread: false })
+
+    compare(Quickshell.detachedCommands[0], ["/usr/bin/xdg-open", "https://app.fastmail.com/mail/Inbox/TAB5kIMdwqots"])
+    verifyDetachedContext(0)
+  }
+
+  function test_email_click_without_a_trusted_launcher_runs_nothing() {
+    service.tools = ({ "xdg-open": "/home/tester/.local/bin/xdg-open" })
+    service.settings = { openAction: "browser" }
+    service.openNotification({ id: "AB5kIMdwqots", url: "https://app.fastmail.com/mail/Inbox", unread: false })
+
+    compare(Quickshell.detachedCommands.length, 0)
+    verify(service.lastError.indexOf("system directory") !== -1)
   }
 
   function test_email_click_marks_an_unseen_thread_seen() {
@@ -823,11 +870,11 @@ TestCase {
     service.notifications = [{ id: "AB5kIMdwqots", accountId: "u12345678", unread: true }]
     service.openNotification(service.notifications[0])
 
-    compare(Quickshell.detachedCommands.length, 2)
+    compare(Quickshell.detachedCommands.length, 1)
     compare(processCommand(findCliProcess("seen")), ["fm-cli", "seen", "AB5kIMdwqots", "--account", "u12345678", "--json"])
     compare(service.unreadCount, 0)
     service.openNotification(null)
-    compare(Quickshell.detachedCommands.length, 2)
+    compare(Quickshell.detachedCommands.length, 1)
   }
 
   function test_tui_notification_click_opens_the_thread_in_the_tui() {
@@ -840,7 +887,8 @@ TestCase {
     var toast = findToastProcess()
     verify(toast !== null)
     var command = processCommand(toast)
-    compare(command.slice(-3), ["bash", "-c", Model.tuiOpenShell("AB5kIMdwqots", "StmlKEsTVdXB")])
+    compare(command.slice(command.indexOf("--exec") + 1),
+      Model.tuiOpenCommand(service.runtime, "AB5kIMdwqots", "StmlKEsTVdXB"))
   }
 
   function test_browser_notification_click_opens_the_message_url() {
@@ -852,7 +900,58 @@ TestCase {
 
     var toast = findToastProcess()
     verify(toast !== null)
-    compare(processCommand(toast).slice(-3), ["--exec", "xdg-open", "https://app.fastmail.com/mail/Inbox/TAB5kIMdwqots"])
+    compare(processCommand(toast).slice(-3), ["--exec", "/usr/bin/xdg-open", "https://app.fastmail.com/mail/Inbox/TAB5kIMdwqots"])
+  }
+
+  function test_no_toast_without_a_trusted_notification_sender() {
+    service.settings = { notify: true }
+    service.toastDebounceMs = 0
+    beginRefresh()
+    findProbeProcess().complete(0, 'tools {}\n' + probeIdentity + 'fm-cli version 0.3.0\n{"ok":true,"data":{"authenticated":true}}', "")
+    findCliProcess("account").complete(0, oneAccount, "")
+    findCliProcess("box").complete(0, emptyInbox, "")
+    findWatchProcess().emitLine(newLunchLine)
+    tick()
+    compare(findToastProcess(), null)
+  }
+
+  function test_an_untrusted_cli_runs_nothing_and_says_why() {
+    service.notifications = [{ id: "old", unread: true }]
+    beginRefresh()
+    findProbeProcess().complete(0, probeTools + 'untrusted {"reason":"/home/tester/.local/share/mise/installs/github-ninepointlabs-fm-cli/0.3.0/fm-cli does not match the fm-cli 0.3.0 release"}\n', "")
+
+    compare(service.cliUntrusted, true)
+    compare(service.installed, true)
+    compare(service.probeError, true)
+    verify(service.lastError.indexOf("failed verification") !== -1)
+    compare(service.notifications.length, 0)
+    compare(service.refreshing, false)
+    verify(!findCliProcess("account").running)
+    verify(findWatchProcess() === null || !findWatchProcess().running)
+
+    // Verification passing again recovers on the next probe.
+    beginRefresh()
+    findProbeProcess().complete(0, signedInProbe, "")
+    compare(service.cliUntrusted, false)
+    verify(findCliProcess("account").running)
+  }
+
+  function test_a_python3_that_does_not_start_falls_through_to_the_next_fixed_path() {
+    var probe = findProbeProcess()
+    compare(probe.command[0], "/usr/bin/python3")
+    service._probeStarted = false
+    probe.complete(-1, "", "")
+    compare(service._pythonIndex, 1)
+    compare(findProbeProcess().command[0], "/bin/python3")
+    verify(findProbeProcess().running)
+
+    // Past the last candidate: nothing on PATH is tried.
+    service._pythonIndex = Model.pythonCandidates.length - 1
+    service._probeStarted = false
+    findProbeProcess().complete(-1, "", "")
+    compare(service.runtime, null)
+    compare(service.refreshing, false)
+    verify(service.lastError.indexOf("python3 was not found") !== -1)
   }
 
   function test_app_notification_click_for_a_burst_opens_the_inbox() {
@@ -866,7 +965,7 @@ TestCase {
 
     var toast = findToastProcess()
     verify(toast !== null)
-    compare(processCommand(toast).slice(-3), ["--exec", "omarchy-launch-webapp", "https://app.fastmail.com/mail/Inbox"])
+    compare(processCommand(toast).slice(-3), ["--exec", "/usr/bin/omarchy-launch-webapp", "https://app.fastmail.com/mail/Inbox"])
   }
 
   function test_flipping_notify_leaves_the_watch_alone() {
@@ -875,7 +974,7 @@ TestCase {
 
     service.settings = { notify: true }
     verify(before.running)
-    compare(processCommand(before), ["setpriv", "--pdeathsig", "TERM", "fm-cli", "--account", "all", "watch", "--events", "added,updated,deleted,new,resync"])
+    compare(processCommand(before), ["fm-cli", "--account", "all", "watch", "--events", "added,updated,deleted,new,resync"])
     compare(service.watchRestartScheduled, false)
 
     // Off drops a toast that was about to go out.
@@ -1101,7 +1200,7 @@ TestCase {
 
   function test_box_failure_without_an_envelope_gets_a_generic_message() {
     var box = refreshToBox()
-    box.complete(124, "", "")
+    box.complete(1, "", "")
     compare(service.lastError, "Could not read Fastmail folders")
     compare(service.refreshing, false)
   }
@@ -1109,9 +1208,21 @@ TestCase {
   function test_inbox_read_failure_without_an_envelope_names_the_inbox() {
     service.settings = { folders: "inbox" }
     var box = refreshToBox()
-    box.complete(124, "", "")
+    box.complete(1, "", "")
     compare(service.lastError, "Could not read the Fastmail Inbox")
     compare(service.refreshing, false)
+  }
+
+  function test_the_supervisor_names_a_deadline_or_an_output_cap() {
+    var box = refreshToBox()
+    box.complete(201, '{"ok":true,"data":{"id":"P-F","postings":[', "")
+    compare(service.lastError, "The fm-cli response exceeded its size limit")
+    compare(service.refreshing, false)
+
+    beginRefresh()
+    findProbeProcess().complete(124, "", "")
+    compare(service.lastError, "fm-cli did not answer in time")
+    compare(service.probeError, true)
   }
 
   function test_refresh_during_a_fetch_is_coalesced_not_dropped() {

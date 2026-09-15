@@ -7,6 +7,7 @@ const { spawn, spawnSync } = require("node:child_process")
 const Model = require("../Model.js")
 
 const cli = path.join(__dirname, "..", "demo", "bin", "fm-cli")
+const demoContext = Model.runtimeContext("/usr/bin/python3", path.join(__dirname, ".."))
 
 function demo(args, stateDir) {
   return spawnSync(cli, args, {
@@ -90,7 +91,7 @@ test("demo CLI fixtures follow the fm-cli scripting contract", () => {
 test("demo CLI serves the all box with folders and unseen threads from other folders", () => {
   withState(stateDir => {
     const accounts = Model.parseAccounts(JSON.stringify(successfulJson(["account", "list", "--json"], stateDir))).accounts
-    const box = successfulJson(Model.capturedCommandPayload(Model.boxCommand(50, true, "all", "")).slice(1), stateDir)
+    const box = successfulJson(Model.capturedCommandPayload(Model.boxCommand(demoContext, 50, true, "all", "")).slice(1), stateDir)
     assert.equal(box.data.id, "all")
     assert.equal(box.data.kind, "all")
     assert.equal(box.data.name, "All folders")
@@ -125,7 +126,7 @@ test("demo CLI serves the all box with folders and unseen threads from other fol
 
 test("demo CLI honors repeated --exclude pairs on the all box", () => {
   withState(stateDir => {
-    const command = Model.capturedCommandPayload(Model.boxCommand(50, true, "all", "newsletters, Family")).slice(1)
+    const command = Model.capturedCommandPayload(Model.boxCommand(demoContext, 50, true, "all", "newsletters, Family")).slice(1)
     assert.deepEqual(command.slice(-4), ["--exclude", "newsletters", "--exclude", "Family"])
     const box = successfulJson(command, stateDir)
     assert.equal(box.data.unread_count, 9)

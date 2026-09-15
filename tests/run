@@ -5,6 +5,11 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 bash -n "$root/demo/run"
 
+# The runner (fm-cli identity, closed environments, setup lock) and the
+# supervisor (caps, deadlines, race-free process-group termination).
+/usr/bin/python3 -I -B -m unittest discover -s "$root/tests" -p '*_test.py'
+"$root/tests/bounded-run.test.sh" "$root/bin/bounded-run"
+
 node --test \
   --experimental-test-coverage \
   --test-coverage-lines=90 \
