@@ -23,63 +23,107 @@ function posting(overrides = {}) {
   }
 }
 
+const setupContext = Model.runtimeContext("/usr/bin/python3", "/opt/plugins/ninepointlabs.fastmail")
+const terminal = "/usr/bin/omarchy-launch-floating-terminal-with-presentation"
+const setupTools = { "omarchy-launch-floating-terminal-with-presentation": terminal, "wl-copy": "/usr/bin/wl-copy" }
+
+function setupShell(mode) {
+  return `'/usr/bin/python3' '-I' '-S' '-B' '/opt/plugins/ninepointlabs.fastmail/bin/fm-cli-run' 'setup' '${mode}' 'ninepointlabs.fastmail'`
+}
+
 test("setupPlan signs in when fm-cli is installed and current", () => {
-  const plan = Model.setupPlan(true, false, false, "ninepointlabs.fastmail")
+  const plan = Model.setupPlan(true, false, false, "ninepointlabs.fastmail", setupContext, setupTools)
 
   assert.equal(plan.needed, true)
   assert.equal(plan.title, "Please sign in")
   assert.equal(plan.buttonLabel, "Sign in to Fastmail…")
   assert.equal(plan.command, "fm-cli setup --silent-success")
-  assert.equal(plan.launchCommand,
-    Model.setupLaunchCommand("fm-cli setup --silent-success", "ninepointlabs.fastmail"))
+  assert.equal(plan.mode, "signin")
+  assert.deepEqual(plan.launchCommand, [terminal, setupShell("signin")])
 })
 
 test("setupPlan installs fm-cli before signing in", () => {
-  const plan = Model.setupPlan(false, false, false, "ninepointlabs.fastmail")
+  const plan = Model.setupPlan(false, false, false, "ninepointlabs.fastmail", setupContext, setupTools)
 
   assert.equal(plan.needed, true)
   assert.equal(plan.title, "")
   assert.equal(plan.buttonLabel, "Install fm-cli…")
   assert.equal(plan.command, "")
-  assert.equal(plan.launchCommand,
-    Model.setupLaunchCommand("omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli && fm-cli setup --silent-success", "ninepointlabs.fastmail"))
+  assert.deepEqual(plan.launchCommand, [terminal, setupShell("install")])
 })
 
 test("setupPlan updates an outdated signed-out CLI before setup", () => {
-  const plan = Model.setupPlan(true, false, true, "ninepointlabs.fastmail")
+  const plan = Model.setupPlan(true, false, true, "ninepointlabs.fastmail", setupContext, setupTools)
 
   assert.equal(plan.needed, true)
   assert.equal(plan.buttonLabel, "Update fm-cli…")
-  assert.equal(plan.launchCommand,
-    Model.setupLaunchCommand("omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli && fm-cli setup --silent-success", "ninepointlabs.fastmail"))
+  assert.deepEqual(plan.launchCommand, [terminal, setupShell("install")])
 })
 
 test("setupPlan prioritizes installation and is not needed when setup is complete", () => {
-  assert.equal(Model.setupPlan(false, true, false, "ninepointlabs.fastmail").buttonLabel, "Install fm-cli…")
-  assert.equal(Model.setupPlan(true, true, false, "ninepointlabs.fastmail").needed, false)
+  assert.equal(Model.setupPlan(false, true, false, "ninepointlabs.fastmail", setupContext, setupTools).buttonLabel, "Install fm-cli…")
+  assert.equal(Model.setupPlan(true, true, false, "ninepointlabs.fastmail", setupContext, setupTools).needed, false)
 })
 
-test("setupLockCheckCommand uses a private runtime directory without a /tmp fallback", () => {
-  const command = Model.setupLockCheckCommand()
-  assert.deepEqual(command.slice(0, 2), ["bash", "-c"])
-  assert.match(command[2], /XDG_RUNTIME_DIR:-\/run\/user\/\$uid/)
-  assert.match(command[2], /ninepointlabs\.fastmail-\$uid/)
-  assert.match(command[2], /stat -c %a/)
-  assert.match(command[2], /exec 9<"\$lock"/)
-  assert.match(command[2], /flock -n 9$/)
-  assert.doesNotMatch(command[2], /\/tmp/)
-  assert.doesNotMatch(command[2], /9>/)
+test("the setup launch fails closed without a trusted launcher, a runtime, or a plain IPC target", () => {
+  assert.deepEqual(Model.setupPlan(true, false, false, "ninepointlabs.fastmail", setupContext, {}).launchCommand, [])
+  assert.deepEqual(Model.setupPlan(true, false, false, "ninepointlabs.fastmail", null, setupTools).launchCommand, [])
+  assert.deepEqual(Model.setupPlan(true, false, false, "target's name", setupContext, setupTools).launchCommand, [])
+  assert.deepEqual(Model.setupPlan(true, false, false, "ninepointlabs.fastmail", setupContext,
+    { "omarchy-launch-floating-terminal-with-presentation": "/home/me/bin/omarchy-launch-floating-terminal-with-presentation" }).launchCommand, [])
+  assert.deepEqual(Model.setupLaunchCommand(setupContext, setupTools, "rm", "ninepointlabs.fastmail"), [])
 })
 
-test("setupLaunchCommand safely quotes the IPC target", () => {
-  const command = Model.setupLaunchCommand("true", "target's name")
-  assert.match(command, /target='target'\\''s name'/)
-  assert.match(command, /setupFinished/)
-  assert.match(command, /Fastmail setup is already running/)
-  assert.match(command, /exit 75/)
-  assert.match(command, /9<"\$lock"/)
-  assert.doesNotMatch(command, /9>/)
-  assert.doesNotMatch(command, /\/tmp/)
+test("the one string the terminal launcher evaluates splits back into the exact argv", () => {
+  const odd = Model.runtimeContext("/usr/bin/python3", "/home/o'neil/My Plugins/$(touch x);fastmail")
+  const [, shell] = Model.setupLaunchCommand(odd, setupTools, "signin", "ninepointlabs.fastmail")
+  const { spawnSync } = require("node:child_process")
+  const result = spawnSync("/usr/bin/bash", ["--noprofile", "--norc", "-c", "printf '%s\\n' " + shell], { encoding: "utf8", env: {} })
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(result.stdout.trimEnd().split("\n"), [
+    "/usr/bin/python3", "-I", "-S", "-B", "/home/o'neil/My Plugins/$(touch x);fastmail/bin/fm-cli-run",
+    "setup", "signin", "ninepointlabs.fastmail"
+  ])
+})
+
+test("setupLockCheckCommand runs the runner under the supervisor", () => {
+  const command = Model.setupLockCheckCommand(setupContext)
+  assert.equal(command[0], "/usr/bin/python3")
+  assert.equal(command[4], setupContext.supervisor)
+  assert.deepEqual(Model.capturedCommandPayload(command), ["fm-cli-run", "setup-lock-check"])
+  assert.deepEqual(Model.setupLockCheckCommand(null), [])
+})
+
+test("copyCommand hands the text to the resolved wl-copy as one argument", () => {
+  assert.deepEqual(Model.copyCommand(setupTools, "fm-cli setup --silent-success"),
+    ["/usr/bin/wl-copy", "--", "fm-cli setup --silent-success"])
+  assert.deepEqual(Model.copyCommand({}, "x"), [])
+})
+
+test("parseProbe reads the tool table, the identity, the version and the status", () => {
+  const probe = Model.parseProbe('tools {"xdg-open":"/usr/bin/xdg-open","wl-copy":"/home/me/bin/wl-copy","omarchy-launch-webapp":"/usr/bin/xdg-open","evil":"/usr/bin/evil"}\n'
+    + 'identity {"source":"package","path":"/usr/bin/fm-cli"}\nfm-cli version 0.3.1\n{"ok":true}')
+  assert.deepEqual(probe.tools, { "xdg-open": "/usr/bin/xdg-open" })
+  assert.equal(probe.state, "ok")
+  assert.deepEqual(probe.identity, { source: "package", path: "/usr/bin/fm-cli" })
+  assert.equal(probe.version, "0.3.1")
+  assert.equal(probe.status, '{"ok":true}')
+
+  assert.equal(Model.parseProbe("tools {}\nmissing\n").state, "missing")
+  const untrusted = Model.parseProbe('tools not-json\nuntrusted {"reason":"bad\\u202ebytes"}\n')
+  assert.equal(untrusted.state, "untrusted")
+  assert.equal(untrusted.reason, "bad bytes")
+  assert.equal(Model.parseProbe('untrusted nope').reason, "fm-cli failed verification")
+  assert.equal(Model.parseProbe("x".repeat(Model.probeResponseByteLimit + 1)).status, "")
+  assert.deepEqual(Model.parseProbe('{"ok":true}'), { tools: {}, state: "", identity: null, reason: "", version: "", status: '{"ok":true}' })
+})
+
+test("fileUrlPath accepts only plain absolute file URLs", () => {
+  assert.equal(Model.fileUrlPath("file:///home/me/.config/omarchy/plugins/ninepointlabs.fastmail/"), "/home/me/.config/omarchy/plugins/ninepointlabs.fastmail")
+  assert.equal(Model.fileUrlPath("file:///home/me/My%20Plugins"), "/home/me/My Plugins")
+  for (const bad of ["http://x/", "file://relative", "file:///a/../b", "file:///a/%0Ab", "file:///a/%E0%A4%A", "", null]) {
+    assert.equal(Model.fileUrlPath(bad), "", String(bad))
+  }
 })
 
 test("parseJson accepts successful objects and reports CLI errors", () => {

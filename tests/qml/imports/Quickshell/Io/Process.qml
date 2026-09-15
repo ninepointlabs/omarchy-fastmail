@@ -5,14 +5,20 @@ QtObject {
 
   property bool running: false
   property var command: []
+  property bool clearEnvironment: false
+  property var environment: ({})
   property var stdout: null
   property var stderr: null
   property bool _completing: false
 
+  signal started()
   signal exited(int exitCode, int exitStatus)
 
   // A real Process reports the exit of a child it was told to stop, too.
-  onRunningChanged: if (!running && !_completing) exited(143, 1)
+  onRunningChanged: {
+    if (running) started()
+    else if (!_completing) exited(143, 1)
+  }
 
   function complete(exitCode, stdoutText, stderrText) {
     feed(stdout, stdoutText)

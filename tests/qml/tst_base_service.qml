@@ -25,28 +25,19 @@ TestCase {
     service = null
   }
 
+  // Every process: a fixed python3 running the plugin's supervisor, with the
+  // inherited environment replaced by a closed one.
   function processCommand(process) {
     var raw = process.command
     var payload = Model.capturedCommandPayload(raw)
-    var setupLock = JSON.stringify(raw) === JSON.stringify(Model.setupLockCheckCommand())
-    if (!setupLock && payload.length > 0 && (payload[0] === "fm-cli" || payload[0] === "setpriv"
-        || payload[0] === "omarchy-notification-send"
-        || (payload[0] === "bash" && String(payload[2] || "").indexOf("fm-cli") !== -1))) {
-      verify(raw.length > payload.length, "fm-cli command has a producer-side output guard")
-      compare(raw[0], "setpriv")
-      compare(raw[1], "--pdeathsig")
-      compare(raw[2], "TERM")
-      compare(raw[3], "bash")
-      compare(raw[4], "-o")
-      compare(raw[5], "pipefail")
-      compare(raw[6], "-c")
-      compare(raw[8], "fm-output-guard")
-      verify(Number(raw[9]) > 0)
-      verify(Number(raw[10]) > 0)
-      verify(Number(raw[11]) >= 0)
-      verify(Number(raw[12]) > 0)
-      if (payload[0] === "setpriv" && payload.indexOf("watch") !== -1) compare(Number(raw[11]), 0)
-      else verify(Number(raw[11]) > 0)
+    if (raw.length > 0) {
+      compare(raw[0], "/usr/bin/python3")
+      compare(raw.slice(1, 4), ["-I", "-S", "-B"])
+      compare(raw[4], service.runtime.supervisor)
+      compare(raw[13], "--")
+      compare(raw.slice(14, 19), ["/usr/bin/python3", "-I", "-S", "-B", service.runtime.runner])
+      compare(process.clearEnvironment, true)
+      compare(process.environment.PATH, Model.trustedPathEnvironment)
     }
     return payload
   }
@@ -68,8 +59,8 @@ TestCase {
     return null
   }
 
-  function probeProcess() { return findProcess(Model.capturedCommandPayload(Model.probeCommand)) }
-  function setupLockProcess() { return findProcess(Model.setupLockCheckCommand()) }
+  function probeProcess() { return findProcess(["fm-cli-run", "probe"]) }
+  function setupLockProcess() { return findProcess(["fm-cli-run", "setup-lock-check"]) }
   function accountsProcess() { return findProcess(["fm-cli", "account", "list"]) }
   function notificationProcess() { return findProcess(["fm-cli", "box", "view"]) }
   function readProcess() { return findProcess(["fm-cli", "seen"]) }
@@ -99,7 +90,7 @@ TestCase {
 
     var process = setupLockProcess()
     verify(process !== null)
-    compare(processCommand(process), Model.setupLockCheckCommand())
+    compare(processCommand(process), ["fm-cli-run", "setup-lock-check"])
     verify(!service.tryStartSetup())
 
     process.complete(0, "", "")
@@ -158,6 +149,18 @@ TestCase {
     compare(service.notifications.length, 0)
     compare(service.unreadCount, 0)
     compare(service.refreshing, false)
+  }
+
+  function test_processes_get_only_the_closed_environment() {
+    var process = probeProcess()
+    verify(process !== null)
+    compare(process.environment, { PATH: Model.trustedPathEnvironment, HOME: "/home/tester", XDG_RUNTIME_DIR: "/tmp" })
+  }
+
+  function test_plugin_directory_resolves_to_the_checkout() {
+    verify(service.pluginDirectory.charAt(0) === "/")
+    compare(service.runtime.runner, service.pluginDirectory + "/bin/fm-cli-run")
+    compare(service.runtime.supervisor, service.pluginDirectory + "/bin/bounded-run")
   }
 
   function test_authenticated_probe_starts_the_account_list() {
