@@ -40,7 +40,10 @@ client for Fastmail, which the panel installs for you.
 
 - Omarchy with Quickshell plugin support.
 - A Fastmail account.
-- fm-cli 0.3.0 or newer. The panel installs it if it is missing.
+- fm-cli 0.3.0: the `fm-cli` package, or the pinned release the panel installs
+  for you if it is missing.
+- The system `python3` (`/usr/bin/python3`, standard library only), which
+  Omarchy already ships. The plugin's two small helpers in `bin/` run on it.
 
 ## Install
 
@@ -51,8 +54,9 @@ omarchy plugin add https://github.com/ninepointlabs/omarchy-fastmail.git --enabl
 Click the envelope in the bar. The panel checks for fm-cli:
 
 1. **Install fm-cli…** appears when it is missing. It opens a floating
-   terminal that installs the pinned release through mise, then goes straight
-   into sign-in.
+   terminal that installs the pinned 0.3.0 release through mise, checks it
+   against the release's published binary, then goes straight into sign-in.
+   If you install the `fm-cli` package instead, the plugin uses that.
 2. **Sign in to Fastmail…** appears when fm-cli is there but signed out. It
    opens Fastmail's consent page in your browser. Approve fm-cli there, and the
    terminal window closes on its own. Nothing to copy or paste. The
@@ -146,25 +150,74 @@ untrusted:
   shell string.
 - The install command pins the fm-cli release this plugin was tested with; it
   is not "latest".
-- The long-lived `fm-cli watch` is output- and event-rate-bounded and runs
-  under `setpriv --pdeathsig TERM`, so it ends with the shell that started it.
 
-For reviewers, this is everything the plugin executes:
+### What runs, and which binary
+
+Nothing the plugin starts is looked up on your `PATH`, and nothing runs through
+a shell string it builds. Every process is started as an argument list from a
+fixed `/usr/bin/python3 -I -S -B` (no `PYTHON*` variables, no user site
+packages), with the shell's environment replaced by a closed one: a `PATH` of
+`/usr/bin:/bin:/usr/sbin:/sbin` (plus `/usr/share/omarchy/bin` for Omarchy's
+launchers), and only the variables fm-cli or the desktop needs — `HOME`, the
+`XDG_*` directories, the session bus, the Wayland display, fm-cli's own
+`FM_API_TOKEN`/`FM_EMAIL`/`FM_APP_PASSWORD` if you use them. `BASH_ENV`,
+`LD_PRELOAD` and everything else is dropped.
+
+- **`bin/bounded-run`** supervises every command: at most N bytes of each
+  output stream reach the shell (the first byte past a cap ends the job), a
+  deadline ends a finite command, and termination is TERM, a grace period,
+  then KILL to the command's whole process group and every descendant. The
+  supervisor is the command's direct parent and a child subreaper, and never
+  reaps it before its last signal, so no signal can land on a reused process
+  id. It ends with the shell (`PR_SET_PDEATHSIG`), and the command ends with it.
+- **`bin/fm-cli-run`** decides which fm-cli runs, every time one runs:
+  1. `/usr/bin/fm-cli` from the `fm-cli` package, if present. It must be a
+     regular file owned by root, in root-owned directories nobody else can
+     write; it is opened once and executed from that descriptor.
+  2. Otherwise the pinned mise install,
+     `~/.local/share/mise/installs/github-ninepointlabs-fm-cli/0.3.0/fm-cli`.
+     No symlink may appear on that path, every entry must be yours or root's
+     and closed to group and other writes, and the file's SHA-256 must match
+     the `fm-cli` binary in the v0.3.0 release archive for your architecture
+     (the archives themselves checked against the release's `checksums.txt`).
+     The bytes are read once, hashed, copied into a sealed in-memory file and
+     executed from it, so what runs is exactly what was checked.
+
+  A binary that fails either check is not run; the panel says why. The
+  package wins because root-owned files cannot be replaced by anything running
+  as you; the mise copy is only trusted because its bytes are pinned here.
+  The Omarchy helpers it launches (listed below) are taken only from root-owned
+  system directories.
+
+For reviewers, this is everything the plugin executes. Every line runs as
+`/usr/bin/python3 -I -S -B <plugin>/bin/bounded-run --stdout-cap … --stderr-cap …
+--deadline … --grace … -- /usr/bin/python3 -I -S -B <plugin>/bin/fm-cli-run …`
+unless marked otherwise:
 
 ```text
-fm-cli --version; fm-cli auth status --json                   (probe)
-fm-cli account list --json
-fm-cli box view all|inbox --account all --limit 50 --json [--exclude <folder>]...
-fm-cli --account all watch --events added,updated,deleted,new,resync
-fm-cli seen <thread-id> [--account <id>] --json
-fm-cli tui --thread <id> [--email <id>] --remote               (hand-off to a running TUI)
-omarchy-launch-or-focus com.ninepointlabs.fm-cli '<quoted omarchy-launch-tui … fm-cli tui …>'
-omarchy-launch-webapp <url> | xdg-open <url>
-omarchy-notification-send … --exec <one of the three above, as argv>
-omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli && fm-cli setup --silent-success
-                                                               (in a floating terminal, on your click)
-flock -n <lock under $XDG_RUNTIME_DIR>; wl-copy               (setup lock; copying the setup command)
+fm-cli-run probe          helper table; fm-cli identity; fm-cli --version; fm-cli auth status --json
+fm-cli-run exec account list --json
+fm-cli-run exec box view all|inbox --account all --limit 50 --json [--exclude <folder>]...
+fm-cli-run exec --account all watch --events added,updated,deleted,new,resync   (no deadline)
+fm-cli-run exec seen <thread-id> [--account <id>] --json
+fm-cli-run setup-lock-check                                     (flock on a private dir in $XDG_RUNTIME_DIR)
+/usr/bin/omarchy-notification-send … --exec <one of the next three lines, as argv>
+fm-cli-run open-tui [--thread <id>] [--email <id>]              (detached, on a click)
+    → verified fm-cli tui --thread <id> [--email <id>] --remote
+    → /usr/bin/omarchy-launch-or-focus com.ninepointlabs.fm-cli
+        '/usr/bin/omarchy-launch-tui' '--app-id=com.ninepointlabs.fm-cli' '/usr/bin/python3' … 'fm-cli-run' 'exec' 'tui' …
+/usr/bin/omarchy-launch-webapp <url> | /usr/bin/xdg-open <url>  (detached, on a click)
+/usr/bin/omarchy-launch-floating-terminal-with-presentation \
+    "'/usr/bin/python3' '-I' '-S' '-B' '<plugin>/bin/fm-cli-run' 'setup' 'install|signin' 'ninepointlabs.fastmail'"
+    → /usr/bin/omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli   (install only)
+    → verified fm-cli setup --silent-success
+    → /usr/bin/omarchy-shell -q ninepointlabs.fastmail setupFinished
+/usr/bin/wl-copy -- 'fm-cli setup --silent-success'             (detached, copying the setup command)
 ```
+
+The two launchers that evaluate an argument (`omarchy-launch-or-focus` and the
+floating terminal) only ever get single-quoted words, each a fixed word, a
+verified path, or an id that matched the JMAP alphabet.
 
 It writes only its own entry in `~/.config/omarchy/shell.json` and a lock
 directory under `$XDG_RUNTIME_DIR`. Credentials live in your keyring, managed
@@ -184,10 +237,12 @@ workspace, with the shell restored on exit:
 ```
 
 The screenshots above come from those commands; `demo/bin/fm-cli` is a small
-Python fake of the CLI that never contacts Fastmail. Tests:
+Python fake of the CLI that never contacts Fastmail. Since the plugin never
+looks fm-cli up on `PATH`, the demo links a staged copy of the checkout whose
+runner is pointed at the fake; the checkout itself is left untouched. Tests:
 
 ```bash
-./tests/run      # node tests for the model and demo, QML tests for the service
+./tests/run      # runner and supervisor tests, node tests for the model and demo, QML tests for the service
 ```
 
 ## Updating and removal
@@ -205,8 +260,9 @@ with `fm-cli auth logout`; remove fm-cli itself with
 ## Credits
 
 Adapted from 37signals' [HEY plugin for Omarchy](https://github.com/basecamp/omarchy-hey-plugin)
-(MIT, Copyright (c) 2026 37signals LLC): the service, panel, bounded process
-wrapper, demo harness and test suite descend from that project. The plain-text
+(MIT, Copyright (c) 2026 37signals LLC): the service, panel, demo harness and
+test suite descend from that project. `bin/bounded-run` and `bin/fm-cli-run`
+are this plugin's own. The plain-text
 dropdown descends from Omarchy's own `Dropdown.qml`. Full attributions are in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

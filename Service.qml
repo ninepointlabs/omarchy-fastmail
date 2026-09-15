@@ -35,6 +35,24 @@ Item {
   // from setup states, so the panel can keep retrying: a transient failure
   // mid-install/mid-login must not strand a stuck error.
   property bool probeError: false
+  // An fm-cli was found but failed verification — the wrong bytes for the
+  // pinned release, or an owner or mode someone else could have used to
+  // replace it. Nothing runs, and the panel says why.
+  property bool cliUntrusted: false
+  // The helpers the panel launches, where fm-cli-run found them in trusted
+  // system directories on the last probe. A missing entry disables that action.
+  property var tools: ({})
+
+  // Every process starts from a fixed python3 running the plugin's own
+  // bin/bounded-run and bin/fm-cli-run, never from a PATH lookup, and with the
+  // shell's environment replaced by one of these closed ones.
+  readonly property string pluginDirectory: Model.fileUrlPath(Qt.resolvedUrl("."))
+  property int _pythonIndex: 0
+  property bool _probeStarted: false
+  readonly property var runtime: Model.runtimeContext(Model.pythonCandidates[_pythonIndex] || "", pluginDirectory)
+  readonly property var cliEnvironment: Model.cliEnvironment(function(name) { return Quickshell.env(name) })
+  readonly property var sessionEnvironment: Model.sessionEnvironment(function(name) { return Quickshell.env(name) })
+
   property var accounts: []
   property var notifications: []
   // The read's folders: the Inbox plus every other included folder with
@@ -213,7 +231,7 @@ Item {
   }
 
   function checkSetupRunning() {
-    if (!setupLockProcess.running) setupLockProcess.running = true
+    if (!setupLockProcess.running && setupLockProcess.command.length > 0) setupLockProcess.running = true
   }
 
   function refresh() {
@@ -222,14 +240,35 @@ Item {
       refreshPending = true
       return
     }
-    refreshing = true
     lastError = ""
-    // Probe on every refresh: a bare `fm-cli` process would never emit
-    // `exited` if the binary vanished since the last check, sticking
-    // `refreshing` forever. The probe's bash wrapper always exits.
+    if (!runtime) {
+      // No trusted interpreter, or a plugin directory that is not a plain
+      // path: fail closed rather than fall back to anything on PATH.
+      probed = true
+      probeError = true
+      lastError = "python3 was not found in " + Model.pythonCandidates.join(", ") + "; fm-cli was not run"
+      return
+    }
+    refreshing = true
+    // Probe on every refresh: it re-reads where fm-cli is and whether it still
+    // verifies, and the runner always exits, so `refreshing` cannot stick.
     _probeOutput = ""
     _probeErrorOutput = ""
+    _probeStarted = false
     probeProcess.running = true
+  }
+
+  // The probe never started: this python3 candidate does not exist here, so
+  // try the next fixed one.
+  function probeDidNotStart() {
+    refreshing = false
+    if (_pythonIndex + 1 < Model.pythonCandidates.length) {
+      _pythonIndex++
+      refresh()
+      return
+    }
+    _pythonIndex = Model.pythonCandidates.length
+    refresh()
   }
 
   function finishProbe(exitCode, stdout, stderr) {
@@ -237,7 +276,10 @@ Item {
     probeError = false
     var text = String(stdout || "")
     var errorText = String(stderr || "")
-    if (text.trim() === "missing") {
+    var probe = Model.parseProbe(text)
+    tools = probe.tools
+    cliUntrusted = probe.state === "untrusted"
+    if (probe.state === "missing") {
       installed = false
       authenticated = true
       notifications = []
@@ -248,7 +290,17 @@ Item {
     }
     installed = true
 
-    var probe = Model.parseProbe(text)
+    if (cliUntrusted) {
+      authenticated = true
+      probeError = true
+      notifications = []
+      folders = []
+      lastError = conciseError("fm-cli failed verification and was not run: " + probe.reason)
+      refreshing = false
+      stopWatch()
+      return
+    }
+
     cliOutdated = Model.cliVersionTooOld(probe.version)
     if (cliOutdated) {
       lastError = Model.cliTooOldMessage
@@ -262,7 +314,8 @@ Item {
     if (!result.ok || !result.value.data) {
       authenticated = true
       probeError = true
-      lastError = conciseError(errorText || ("Could not check fm-cli: " + (result.error || "unexpected response")))
+      lastError = conciseError(Model.supervisorMessage(exitCode) || errorText
+        || ("Could not check fm-cli: " + (result.error || "unexpected response")))
       refreshing = false
       return
     }
@@ -283,7 +336,7 @@ Item {
   function fetchNotifications(withAccountFilter) {
     _notificationsOutput = ""
     _notificationsError = ""
-    notificationProcess.command = Model.boxCommand(notificationLimit, withAccountFilter, foldersMode, excludeFolders)
+    notificationProcess.command = Model.boxCommand(runtime, notificationLimit, withAccountFilter, foldersMode, excludeFolders)
     notificationProcess.running = true
   }
 
@@ -307,7 +360,7 @@ Item {
     _watchEventCount = 0
     _watchRateLimited = false
     watchStartedAtMs = Date.now()
-    watchProcess.command = Model.watchCommand()
+    watchProcess.command = Model.watchCommand(runtime)
     watchProcess.running = true
   }
 
@@ -396,11 +449,14 @@ Item {
     var toast = Model.composeMailToast(Model.toastBoxName(_toastQueue), postings)
     _toastQueue = []
     _toastOutput = ""
-    toastProcess.command = Model.boundedCaptureCommand(
-      Model.toastCommand(toast.headline, toast.description,
+    var command = Model.supervisedCommand(runtime,
+      Model.toastCommand(runtime, tools, toast.headline, toast.description,
         Model.replaceableToastId(_toastId, _toastAtMs, Date.now()), openAction,
         toast.targetUrl, toast.threadId, toast.emailId),
       Model.cliErrorByteLimit, Model.cliErrorByteLimit)
+    // No trusted notification sender or click launcher: no toast.
+    if (command.length === 0) return
+    toastProcess.command = command
     toastProcess.running = true
   }
 
@@ -459,20 +515,17 @@ Item {
     lastUpdated = new Date()
   }
 
-  // Opening an email: the terminal destination focuses or launches the TUI on
-  // the Inbox — there is no deep link into a thread in this version — while
-  // the web destinations open the thread's own URL on the Fastmail origin.
+  // Opening an email: the terminal destination hands the thread to a running
+  // TUI or starts one on it, through `fm-cli-run open-tui`; the web
+  // destinations open the thread's own URL on the Fastmail origin through the
+  // resolved launcher. Each runs detached, with the closed session environment.
   function openNotification(item) {
     if (!item) return
-    if (openAction === "tui") {
-      // Hand the thread to a running TUI first, then raise it or start one.
-      var remote = Model.tuiRemoteCommand(item.id, item.emailId)
-      if (remote.length > 0) Quickshell.execDetached(remote)
-      Quickshell.execDetached(Model.tuiFocusCommand(item.id, item.emailId))
+    var command = Model.openCommand(runtime, tools, openAction, item.url, item.id, item.emailId)
+    if (command.length > 0) {
+      Quickshell.execDetached({ command: command, environment: sessionEnvironment, clearEnvironment: true })
     } else {
-      var url = Model.fastmailBrowserUrl(item.url)
-      if (openAction === "app") Quickshell.execDetached(["omarchy-launch-webapp", url])
-      else Qt.openUrlExternally(url)
+      lastError = "No launcher for opening email was found in a system directory"
     }
     if (item.unread) markRead(item)
   }
@@ -523,7 +576,7 @@ Item {
     // The account travels with the id once the CLI has listed accounts; a
     // read without one lets the CLI pick its primary account.
     var accountId = accountCount > 0 ? String(_readingNotification.accountId || "") : ""
-    var command = Model.seenCommand(String(_readingNotification.id), accountId)
+    var command = Model.seenCommand(runtime, String(_readingNotification.id), accountId)
     if (command.length === 0) {
       // Not a JMAP id: nothing to mark, and nothing to run.
       _readingNotification = null
@@ -586,6 +639,8 @@ Item {
     id: toastProcess
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.sessionEnvironment
     stdout: StdioCollector {
       id: toastStdout
       waitForEnd: true
@@ -607,6 +662,8 @@ Item {
     id: watchProcess
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.cliEnvironment
     stdout: SplitParser {
       onRead: function(data) { root.watchEvent(data) }
     }
@@ -637,7 +694,10 @@ Item {
   Process {
     id: probeProcess
     running: false
-    command: Model.probeCommand
+    command: Model.probeCommand(root.runtime)
+    clearEnvironment: true
+    environment: root.cliEnvironment
+    onStarted: root._probeStarted = true
     stdout: StdioCollector {
       id: probeStdout
       waitForEnd: true
@@ -649,6 +709,10 @@ Item {
       onStreamFinished: root._probeErrorOutput = text
     }
     onExited: function(exitCode) {
+      if (!root._probeStarted) {
+        root.probeDidNotStart()
+        return
+      }
       root.finishProbe(
         exitCode,
         String(probeStdout.text || root._probeOutput || ""),
@@ -659,8 +723,9 @@ Item {
   Process {
     id: accountsProcess
     running: false
-    command: Model.boundedCaptureCommand(
-      Model.accountListCommand, Model.cliResponseByteLimit, Model.cliErrorByteLimit)
+    command: Model.accountListCommand(root.runtime)
+    clearEnvironment: true
+    environment: root.cliEnvironment
     stdout: StdioCollector {
       id: accountsStdout
       waitForEnd: true
@@ -683,7 +748,8 @@ Item {
         // The account list is part of the minimum CLI: a build without it is
         // too old, not a CLI to work around.
         if (Model.cliTooOld(stdout, stderr)) root.lastError = Model.cliTooOldMessage
-        else root.lastError = root.conciseError(Model.failureMessage(stdout, stderr, "Could not list Fastmail accounts"))
+        else root.lastError = root.conciseError(Model.supervisorMessage(exitCode)
+          || Model.failureMessage(stdout, stderr, "Could not list Fastmail accounts"))
         root.refreshing = false
         return
       }
@@ -703,6 +769,8 @@ Item {
     id: notificationProcess
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.cliEnvironment
     stdout: StdioCollector {
       id: notificationsStdout
       waitForEnd: true
@@ -723,7 +791,7 @@ Item {
           return
         }
         if (Model.cliTooOld(stdout, stderr)) root.lastError = Model.cliTooOldMessage
-        else root.lastError = root.conciseError(Model.failureMessage(stdout, stderr,
+        else root.lastError = root.conciseError(Model.supervisorMessage(exitCode) || Model.failureMessage(stdout, stderr,
           root.foldersMode === "inbox" ? "Could not read the Fastmail Inbox" : "Could not read Fastmail folders"))
         root.refreshing = false
         return
@@ -742,7 +810,9 @@ Item {
   Process {
     id: setupLockProcess
     running: false
-    command: Model.setupLockCheckCommand()
+    command: Model.setupLockCheckCommand(root.runtime)
+    clearEnvironment: true
+    environment: root.cliEnvironment
     onExited: function(exitCode) {
       // Exit 0 acquired the lock, so no setup process holds it; exit 1 means
       // a setup holds it. Anything else is the runtime directory being
@@ -758,6 +828,8 @@ Item {
     id: readProcess
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.cliEnvironment
     stdout: StdioCollector {
       id: readStdout
       waitForEnd: true
@@ -772,7 +844,8 @@ Item {
       var stdout = String(readStdout.text || root._readOutput || "")
       var stderr = String(readStderr.text || root._readError || "")
       if (exitCode !== 0) {
-        root.lastError = root.conciseError(Model.failureMessage(stdout, stderr, "Could not mark the email as seen"))
+        root.lastError = root.conciseError(Model.supervisorMessage(exitCode)
+          || Model.failureMessage(stdout, stderr, "Could not mark the email as seen"))
         root.actionStatus = root.lastError
       } else {
         root.actionStatus = "Marked as seen"
