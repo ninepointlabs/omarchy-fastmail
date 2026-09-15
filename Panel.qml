@@ -154,7 +154,7 @@ Panel {
     return "No previously seen email."
   }
 
-  readonly property var setupPlan: Model.setupPlan(service.installed, service.authenticated, service.cliOutdated, ipcTarget)
+  readonly property var setupPlan: Model.setupPlan(service.installed, service.authenticated, service.cliOutdated, ipcTarget, service.runtime, service.tools)
   readonly property bool needsSetup: service.probed && setupPlan.needed
   readonly property bool missingCli: service.probed && service.installed !== true
 
@@ -163,9 +163,18 @@ Panel {
   // takes, while permitting an immediate retry after failure.
   onNeedsSetupChanged: if (!needsSetup) service.finishSetup()
 
+  // The floating terminal runs `fm-cli-run setup`; the launcher is started as
+  // argv with the closed session environment, not through the bar's login
+  // shell, and the one string it evaluates holds only quoted fixed words.
   function launchSetup() {
-    if (!bar || !service.tryStartSetup()) return
-    bar.run("omarchy-launch-floating-terminal-with-presentation " + Util.shellQuote(setupPlan.launchCommand))
+    if (!service.tryStartSetup()) return
+    var command = setupPlan.launchCommand
+    if (command.length === 0) {
+      service.finishSetup()
+      service.lastError = "Setup needs Omarchy's floating terminal launcher in a system directory"
+      return
+    }
+    Quickshell.execDetached({ command: command, environment: service.sessionEnvironment, clearEnvironment: true })
     close()
   }
 
@@ -884,7 +893,9 @@ Panel {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
-                    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(root.setupPlan.command) + " | wl-copy"])
+                    var copy = Model.copyCommand(service.tools, root.setupPlan.command)
+                    if (copy.length > 0)
+                      Quickshell.execDetached({ command: copy, environment: service.sessionEnvironment, clearEnvironment: true })
                     setupCopiedTimer.restart()
                   }
                 }

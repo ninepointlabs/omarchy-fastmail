@@ -1,0 +1,758 @@
+#!/usr/bin/python3 -IS
+# fm-cli-run: the only program the Fastmail plugin starts, other than the
+# bounded-run supervisor around it. It binds fm-cli, and the Omarchy helpers the
+# plugin reaches, to verified absolute identities and hands each child a closed
+# environment. Nothing here resolves a program through PATH.
+#
+# Always invoked with a fixed interpreter:
+#   /usr/bin/python3 -I -S -B /abs/plugin/bin/fm-cli-run <mode> [args...]
+#
+# Modes:
+#   probe                      print the helper table and fm-cli's identity,
+#                              version and `auth status --json`
+#   exec <fm-cli args...>      run verified fm-cli in place of this process
+#   open-tui [--thread ID] [--email ID]
+#                              hand a thread to a running TUI, then focus or
+#                              launch one
+#   setup install|signin <ipc-target>
+#                              the floating-terminal setup flow, under a lock
+#   setup-lock-check           exit 0 when no setup holds the lock, 1 when one
+#                              does, 76 when the runtime directory is unusable
+#
+# Which fm-cli runs:
+#   1. /usr/bin/fm-cli from the omarchy-pkgs `fm-cli` package, when present:
+#      a regular file owned by root, in root-owned directories nobody else can
+#      write. Opened once, checked on the opened descriptor, executed from it.
+#   2. Otherwise the pinned mise install the panel offers:
+#      $XDG_DATA_HOME/mise/installs/github-ninepointlabs-fm-cli/0.3.0/fm-cli
+#      (XDG_DATA_HOME defaulting to ~/.local/share). Its path may contain no
+#      symlink, file and directories must be owned by you or root and closed to
+#      group/other writes, and its bytes must match the SHA-256 of the fm-cli
+#      binary in the v0.3.0 release archive for this machine. The bytes are read
+#      once, hashed, copied into a sealed memfd and executed from there, so what
+#      runs is exactly what was hashed -- a later write to the file cannot slip
+#      in between the check and the exec.
+#   Anything else -- a package binary that is not root's, a mise binary with the
+#   wrong bytes or permissions -- fails closed, and the panel says why.
+
+import ctypes
+import errno
+import fcntl
+import hashlib
+import hmac
+import json
+import os
+import platform
+import re
+import select
+import shlex
+import signal
+import stat
+import sys
+import time
+
+CLI_VERSION = "0.3.0"
+CLI_PACKAGE_CANDIDATES = ("/usr/bin/fm-cli",)
+CLI_MISE_RELATIVE = ("mise", "installs", "github-ninepointlabs-fm-cli", CLI_VERSION, "fm-cli")
+# SHA-256 of the `fm-cli` binary inside fm-cli_0.3.0_linux_<arch>.tar.gz, each
+# archive first checked against the release's checksums.txt:
+#   amd64 archive aaf41daefcfd6150e8b648778a620a6cf4a0818d36001448f742c400be71230b
+#   arm64 archive 7b9df852f028214e2edf4eeee128041a8831649de200f96584f0e8d79f12d4ce
+CLI_PINNED_SHA256 = {
+    "x86_64": "fc2f0166862e4f816221a6cabdd6abf1ba4a34fb8460fbbe6620f062cbf2aa3e",
+    "aarch64": "b3c87b6817bff5676bb707eb269e781e523f21c46b9aa2251bbb0f53fcb5acb1",
+}
+CLI_MAX_BYTES = 64 * 1024 * 1024
+MISE_PACKAGE = "github:ninepointlabs/fm-cli@" + CLI_VERSION
+
+# Set only in the staged copy demo/run builds; a real install never has them.
+DEMO_CLI = None
+DEMO_ENV = {}
+
+TRUSTED_DIRECTORIES = ("/usr/bin", "/bin", "/usr/sbin", "/sbin", "/run/current-system/sw/bin")
+OMARCHY_DIRECTORIES = ("/usr/bin", "/bin", "/usr/share/omarchy/bin", "/usr/local/share/omarchy/bin")
+PYTHON_CANDIDATES = tuple(d + "/python3" for d in ("/usr/bin", "/bin", "/run/current-system/sw/bin"))
+PATH_ENVIRONMENT = ":".join(TRUSTED_DIRECTORIES)
+# Omarchy's launchers resolve their own helpers (uwsm-app, hyprctl, jq,
+# xdg-terminal-exec) by name, so they get the Omarchy tree as well -- still no
+# directory a user can write.
+SESSION_PATH_ENVIRONMENT = PATH_ENVIRONMENT + ":/usr/share/omarchy/bin"
+
+# Helpers the panel itself launches; the probe reports where each was found.
+PANEL_TOOLS = {
+    "omarchy-launch-webapp": OMARCHY_DIRECTORIES,
+    "omarchy-notification-send": OMARCHY_DIRECTORIES,
+    "omarchy-launch-floating-terminal-with-presentation": OMARCHY_DIRECTORIES,
+    "xdg-open": TRUSTED_DIRECTORIES,
+    "wl-copy": TRUSTED_DIRECTORIES,
+}
+RUNNER_TOOLS = {
+    "omarchy-launch-or-focus": OMARCHY_DIRECTORIES,
+    "omarchy-launch-tui": OMARCHY_DIRECTORIES,
+    "omarchy-shell": OMARCHY_DIRECTORIES,
+    "omarchy-mise-install": OMARCHY_DIRECTORIES,
+}
+
+# What fm-cli reads: its config/cache/runtime directories, the session bus its
+# keyring backends (Secret Service, KWallet) use, the environment credential
+# mode, and -- for the TUI in a terminal -- the terminal's own description and
+# editor. Everything else the caller had, BASH_ENV and LD_PRELOAD included, is
+# dropped.
+CLI_ENVIRONMENT_NAMES = (
+    "HOME", "USER", "LOGNAME", "LANG", "LC_ALL",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS", "DISABLE_KWALLET",
+    "FM_API_TOKEN", "FM_EMAIL", "FM_APP_PASSWORD",
+)
+TERMINAL_ENVIRONMENT_NAMES = (
+    "TERM", "COLORTERM", "TERM_PROGRAM", "KITTY_WINDOW_ID", "WEZTERM_PANE", "KONSOLE_VERSION",
+    "SIXEL_SUPPORT", "EDITOR", "VISUAL", "COLUMNS", "LINES", "WAYLAND_DISPLAY", "DISPLAY",
+)
+# What Omarchy's launchers and the notification/clipboard/browser helpers need
+# to reach the compositor, the session bus and the shell.
+SESSION_ENVIRONMENT_NAMES = (
+    "HOME", "USER", "LOGNAME", "LANG", "LC_ALL",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE",
+    "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "XDG_SESSION_DESKTOP", "XDG_DATA_DIRS",
+    "XDG_CONFIG_DIRS", "OMARCHY_PATH", "TERM", "COLORTERM",
+)
+ABSOLUTE_PATH_NAMES = frozenset((
+    "HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR", "OMARCHY_PATH",
+))
+PATH_LIST_NAMES = frozenset(("XDG_DATA_DIRS", "XDG_CONFIG_DIRS"))
+ENVIRONMENT_VALUE_LIMIT = 4096
+
+JMAP_ID = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9_-]{0,63}\Z")
+IPC_TARGET = re.compile(r"\A[a-z0-9][a-z0-9._-]{0,63}\Z")
+TUI_APP_ID = "com.ninepointlabs.fm-cli"
+LOCK_BASE_PREFIX = "ninepointlabs.fastmail-"
+LOCK_DIRECTORY = "setup-lock"
+
+EXIT_USAGE = 2
+EXIT_UNTRUSTED = 126
+EXIT_MISSING = 127
+EXIT_BUSY = 75
+EXIT_RUNTIME = 76
+VERSION_OUTPUT_LIMIT = 4096
+VERSION_TIMEOUT_SECONDS = 10
+REMOTE_TIMEOUT_SECONDS = 5
+PR_SET_PDEATHSIG = 1
+
+
+class Refused(Exception):
+    """A program or directory that is not trustworthy enough to use."""
+
+
+def say(message, fd=2):
+    try:
+        os.write(fd, (message + "\n").encode("utf-8", "replace"))
+    except OSError:
+        pass
+
+
+# -- environment ---------------------------------------------------------------
+
+def clean_value(name, value):
+    if not isinstance(value, str) or value == "" or len(value) > ENVIRONMENT_VALUE_LIMIT:
+        return None
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        return None
+    if name in ABSOLUTE_PATH_NAMES and not value.startswith("/"):
+        return None
+    if name in PATH_LIST_NAMES and not all(part.startswith("/") for part in value.split(":")):
+        return None
+    return value
+
+
+def closed_environment(source, names, path):
+    environment = {"PATH": path}
+    for name in names:
+        value = clean_value(name, source.get(name))
+        if value is not None:
+            environment[name] = value
+    return environment
+
+
+def cli_environment(source=None):
+    source = os.environ if source is None else source
+    environment = closed_environment(source, CLI_ENVIRONMENT_NAMES + TERMINAL_ENVIRONMENT_NAMES, PATH_ENVIRONMENT)
+    if DEMO_CLI:
+        environment.update(DEMO_ENV)
+    return environment
+
+
+def session_environment(source=None):
+    source = os.environ if source is None else source
+    return closed_environment(source, SESSION_ENVIRONMENT_NAMES, SESSION_PATH_ENVIRONMENT)
+
+
+# -- trusted files -------------------------------------------------------------
+
+def check_closed(info, what, owners):
+    if info.st_uid not in owners:
+        raise Refused("%s is owned by uid %d" % (what, info.st_uid))
+    if not stat.S_ISLNK(info.st_mode) and info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        # A sticky world-writable directory (/tmp) still lets its other users
+        # plant entries, so it is refused too.
+        raise Refused("%s is writable by group or others" % what)
+
+
+def check_path(path, owners, allow_symlinks=True):
+    """Resolve path one component at a time, checking every directory entry
+    that decides where it leads -- each directory, each symlink hop, and the
+    file -- for an allowed owner and no group/other write access. Returns the
+    resolved path and the file's lstat."""
+    if not path.startswith("/"):
+        raise Refused("%s is not an absolute path" % path)
+    check_closed(os.lstat("/"), "/", owners)
+    pending = [part for part in path.split("/") if part not in ("", ".")]
+    current = "/"
+    hops = 0
+    info = None
+    while pending:
+        name = pending.pop(0)
+        if name == "..":
+            current = os.path.dirname(current)
+            continue
+        candidate = current.rstrip("/") + "/" + name
+        try:
+            info = os.lstat(candidate)
+        except OSError as error:
+            raise Refused("%s: %s" % (candidate, error.strerror))
+        check_closed(info, candidate, owners)
+        if stat.S_ISLNK(info.st_mode):
+            if not allow_symlinks:
+                raise Refused("%s is a symlink" % candidate)
+            hops += 1
+            if hops > 40:
+                raise Refused("%s has too many symlinks" % path)
+            target = os.readlink(candidate)
+            if target.startswith("/"):
+                current = "/"
+            pending = [part for part in target.split("/") if part not in ("", ".")] + pending
+            continue
+        if pending and not stat.S_ISDIR(info.st_mode):
+            raise Refused("%s is not a directory" % candidate)
+        current = candidate
+    if info is None or not stat.S_ISREG(info.st_mode):
+        raise Refused("%s is not a regular file" % path)
+    return current, info
+
+
+def system_file_problem(path):
+    """None when path is a root-owned executable nobody else can replace."""
+    try:
+        resolved, _info = check_path(path, (0,))
+        if not os.access(resolved, os.X_OK):
+            raise Refused("%s is not executable" % path)
+    except Refused as problem:
+        return str(problem)
+    except OSError as error:
+        return "%s: %s" % (path, error.strerror)
+    return None
+
+
+def find_tool(name, directories):
+    for directory in directories:
+        candidate = directory + "/" + name
+        if os.path.lexists(candidate) and system_file_problem(candidate) is None:
+            return candidate
+    return None
+
+
+def tool_table(tools):
+    table = {}
+    for name, directories in tools.items():
+        found = find_tool(name, directories)
+        if found:
+            table[name] = found
+    return table
+
+
+def require_tool(name):
+    directories = RUNNER_TOOLS.get(name) or PANEL_TOOLS.get(name)
+    found = find_tool(name, directories)
+    if not found:
+        raise Refused("%s was not found in %s" % (name, ", ".join(directories)))
+    return found
+
+
+def python_path():
+    for candidate in PYTHON_CANDIDATES:
+        if os.path.lexists(candidate) and system_file_problem(candidate) is None:
+            return candidate
+    raise Refused("python3 was not found in a trusted directory")
+
+
+# -- fm-cli identity -----------------------------------------------------------
+
+class Identity:
+    def __init__(self, source, path, digest=None):
+        self.source = source
+        self.path = path
+        self.digest = digest
+
+    def describe(self):
+        return {"source": self.source, "path": self.path}
+
+
+def mise_data_home(source):
+    configured = clean_value("XDG_DATA_HOME", source.get("XDG_DATA_HOME"))
+    if configured:
+        return configured
+    home = clean_value("HOME", source.get("HOME"))
+    if not home:
+        raise Refused("HOME is not set")
+    return home.rstrip("/") + "/.local/share"
+
+
+def resolve_cli(source=None):
+    """Identity to run, or raise LookupError (missing) / Refused (untrusted)."""
+    source = os.environ if source is None else source
+    if DEMO_CLI:
+        return Identity("demo", DEMO_CLI)
+    for candidate in CLI_PACKAGE_CANDIDATES:
+        if os.path.lexists(candidate):
+            problem = system_file_problem(candidate)
+            if problem:
+                # A packaged path that is not root's is not skipped in favour
+                # of another copy: something is wrong with the system.
+                raise Refused(problem)
+            return Identity("package", candidate)
+    base = os.path.realpath(mise_data_home(source))
+    candidate = base + "/" + "/".join(CLI_MISE_RELATIVE)
+    if not os.path.lexists(candidate):
+        raise LookupError("fm-cli is not installed")
+    digest = CLI_PINNED_SHA256.get(platform.machine())
+    if not digest:
+        raise Refused("no pinned fm-cli %s digest for %s" % (CLI_VERSION, platform.machine()))
+    # The data home is already resolved, so no symlink may appear anywhere on
+    # the way to the binary, and every entry must be root's or yours.
+    check_path(candidate, (0, os.geteuid()), allow_symlinks=False)
+    return Identity("mise", candidate, digest)
+
+
+def open_regular(path, owners):
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise Refused("%s is not a regular file" % path)
+        check_closed(info, path, owners)
+        if info.st_size > CLI_MAX_BYTES:
+            raise Refused("%s is larger than %d bytes" % (path, CLI_MAX_BYTES))
+        os.set_blocking(fd, True)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def verified_executable(identity):
+    """A descriptor holding exactly the bytes that passed verification."""
+    if identity.source == "package":
+        return open_regular(identity.path, (0,))
+    fd = open_regular(identity.path, (0, os.geteuid()))
+    try:
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > CLI_MAX_BYTES:
+                raise Refused("%s grew past %d bytes while it was read" % (identity.path, CLI_MAX_BYTES))
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    actual = hashlib.sha256(data).hexdigest()
+    if not hmac.compare_digest(actual, identity.digest):
+        raise Refused("%s does not match the fm-cli %s release (sha256 %s, expected %s)"
+                      % (identity.path, CLI_VERSION, actual, identity.digest))
+    memfd = os.memfd_create("fm-cli", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(memfd, view)
+            view = view[written:]
+        fcntl.fcntl(memfd, fcntl.F_ADD_SEALS,
+                    fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL)
+        return memfd
+    except BaseException:
+        os.close(memfd)
+        raise
+
+
+def cli_argv(identity, args):
+    """(executable, argv) for os.execve: a descriptor, or the demo fake."""
+    if identity.source == "demo":
+        python = python_path()
+        return python, [python, "-I", "-B", identity.path] + list(args)
+    return verified_executable(identity), ["fm-cli"] + list(args)
+
+
+def exec_cli(identity, args, environment):
+    executable, argv = cli_argv(identity, args)
+    os.execve(executable, argv, environment)
+
+
+def spawn_cli(identity, args, environment, stdout=None):
+    return spawn_prepared(cli_argv(identity, args), environment, stdout)
+
+
+def spawn_prepared(command, environment, stdout=None):
+    executable, argv = command
+    pid = os.fork()
+    if pid == 0:
+        try:
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGPIPE):
+                signal.signal(signum, signal.SIG_DFL)
+            if stdout is not None:
+                os.dup2(stdout, 1)
+            os.execve(executable, argv, environment)
+        except BaseException as error:
+            say("fm-cli-run: could not start fm-cli: %s" % error)
+        os._exit(EXIT_UNTRUSTED)
+    if isinstance(executable, int):
+        os.close(executable)
+    return pid
+
+
+def wait_child(pid, timeout=None):
+    """Exit status of our own child; on timeout it is killed first.
+
+    Only this process reaps pid, so the kill can never reach a reused PID."""
+    end = None if timeout is None else time.monotonic() + timeout
+    while True:
+        try:
+            done, status = os.waitpid(pid, 0 if end is None else os.WNOHANG)
+        except ChildProcessError:
+            return 1
+        except InterruptedError:
+            continue
+        if done:
+            return os.waitstatus_to_exitcode(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status)
+        if time.monotonic() >= end:
+            os.kill(pid, signal.SIGKILL)
+            end = None
+        else:
+            time.sleep(0.02)
+
+
+def set_parent_death_signal():
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(PR_SET_PDEATHSIG, ctypes.c_ulong(signal.SIGTERM), 0, 0, 0)
+    except OSError:
+        pass
+
+
+# -- modes ---------------------------------------------------------------------
+
+def mode_probe(args):
+    if args:
+        return usage()
+    say("tools " + json.dumps(tool_table(PANEL_TOOLS), sort_keys=True), 1)
+    environment = cli_environment()
+    try:
+        identity = resolve_cli()
+    except LookupError:
+        say("missing", 1)
+        return 0
+    except Refused as problem:
+        say("untrusted " + json.dumps({"reason": str(problem)}), 1)
+        return 0
+    if identity.source == "demo" and DEMO_ENV.get("FM_DEMO_STATE") == "missing":
+        say("missing", 1)
+        return 0
+    # Verify before saying anything about the identity: the panel only reads
+    # "identity" for a binary whose bytes passed.
+    try:
+        version_command = cli_argv(identity, ["--version"])
+    except (Refused, OSError) as problem:
+        say("untrusted " + json.dumps({"reason": str(problem)}), 1)
+        return 0
+    say("identity " + json.dumps(identity.describe(), sort_keys=True), 1)
+
+    read_end, write_end = os.pipe2(os.O_CLOEXEC)
+    try:
+        pid = spawn_prepared(version_command, environment, stdout=write_end)
+    finally:
+        os.close(write_end)
+    output = b""
+    end = time.monotonic() + VERSION_TIMEOUT_SECONDS
+    while len(output) <= VERSION_OUTPUT_LIMIT:
+        remaining = end - time.monotonic()
+        if remaining <= 0 or not select.select([read_end], [], [], remaining)[0]:
+            break
+        chunk = os.read(read_end, VERSION_OUTPUT_LIMIT)
+        if not chunk:
+            break
+        output += chunk
+    os.close(read_end)
+    wait_child(pid, 0 if len(output) > VERSION_OUTPUT_LIMIT else 1)
+    first = output.split(b"\n", 1)[0].decode("utf-8", "replace")
+    if re.match(r"\Afm-cli version \S{1,64}\Z", first):
+        say(first, 1)
+    try:
+        exec_cli(identity, ["auth", "status", "--json"], environment)
+    except Refused as problem:
+        say("untrusted " + json.dumps({"reason": str(problem)}), 1)
+        return 0
+
+
+def mode_exec(args):
+    try:
+        identity = resolve_cli()
+        set_parent_death_signal()
+        exec_cli(identity, args, cli_environment())
+    except LookupError as problem:
+        say('{"ok":false,"error":"%s","code":"missing"}' % problem)
+        return EXIT_MISSING
+    except Refused as problem:
+        say(json.dumps({"ok": False, "error": "fm-cli failed verification: " + str(problem), "code": "untrusted"}))
+        return EXIT_UNTRUSTED
+
+
+def tui_target(args):
+    target = []
+    seen = set()
+    i = 0
+    while i < len(args):
+        flag = args[i]
+        if flag not in ("--thread", "--email") or flag in seen or i + 1 >= len(args):
+            return None
+        if not JMAP_ID.match(args[i + 1]):
+            return None
+        seen.add(flag)
+        target += [flag, args[i + 1]]
+        i += 2
+    return target
+
+
+def mode_open_tui(args):
+    target = tui_target(args)
+    if target is None:
+        return usage()
+    try:
+        identity = resolve_cli()
+        focus = require_tool("omarchy-launch-or-focus")
+        launch = require_tool("omarchy-launch-tui")
+        python = python_path()
+    except (LookupError, Refused) as problem:
+        say("fm-cli-run: %s" % problem)
+        return EXIT_UNTRUSTED
+    if target:
+        # A running TUI takes the thread and exits 0; with none running this
+        # fails and the launch below starts one on the same thread.
+        try:
+            pid = spawn_cli(identity, ["tui"] + target + ["--remote"], cli_environment())
+            wait_child(pid, REMOTE_TIMEOUT_SECONDS)
+        except Refused as problem:
+            say("fm-cli-run: %s" % problem)
+            return EXIT_UNTRUSTED
+    # omarchy-launch-or-focus evaluates its launch argument, so every word is
+    # quoted; each is a fixed word, a verified absolute path, or a checked id.
+    words = [launch, "--app-id=" + TUI_APP_ID, python, "-I", "-S", "-B",
+             os.path.realpath(__file__), "exec", "tui"] + target
+    command = " ".join(shlex.quote(word) for word in words)
+    os.execve(focus, [focus, TUI_APP_ID, command], session_environment())
+
+
+def runtime_directory(source):
+    uid = os.geteuid()
+    path = clean_value("XDG_RUNTIME_DIR", source.get("XDG_RUNTIME_DIR")) or "/run/user/%d" % uid
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    info = os.fstat(fd)
+    if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(fd)
+        raise Refused("%s is not a private runtime directory" % path)
+    return fd
+
+
+def private_directory(parent, name):
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent)
+    except FileExistsError:
+        pass
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+    info = os.fstat(fd)
+    if info.st_uid != os.geteuid():
+        os.close(fd)
+        raise Refused("%s is owned by another user" % name)
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        os.fchmod(fd, 0o700)
+    return fd
+
+
+def setup_lock():
+    """The held setup lock's descriptor; None when another setup holds it."""
+    runtime = runtime_directory(os.environ)
+    try:
+        base = private_directory(runtime, LOCK_BASE_PREFIX + str(os.geteuid()))
+    finally:
+        os.close(runtime)
+    try:
+        lock = private_directory(base, LOCK_DIRECTORY)
+    finally:
+        os.close(base)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(lock)
+        return None
+    return lock
+
+
+def open_lock_or_exit():
+    try:
+        return setup_lock()
+    except (Refused, OSError) as problem:
+        say("Fastmail setup needs a private runtime directory: %s" % problem)
+        raise SystemExit(EXIT_RUNTIME)
+
+
+def mode_setup_lock_check(args):
+    if args:
+        return usage()
+    lock = open_lock_or_exit()
+    if lock is None:
+        return 1
+    os.close(lock)
+    return 0
+
+
+class Setup:
+    """The floating-terminal flow: install the pinned CLI if asked, sign in,
+    and always tell the shell it finished, preserving the flow's status (130
+    for Ctrl-C, so Omarchy's presentation skips its "done" screen)."""
+
+    def __init__(self, mode, target):
+        self.mode = mode
+        self.target = target
+        self.child = None
+        self.stop_status = None
+
+    def on_signal(self, signum, _frame):
+        if self.stop_status is None:
+            self.stop_status = 128 + signum
+        if self.child is not None:
+            try:
+                os.kill(self.child, signal.SIGTERM if signum == signal.SIGHUP else signum)
+            except ProcessLookupError:
+                pass
+
+    def run_argv(self, argv, environment):
+        pid = os.fork()
+        if pid == 0:
+            try:
+                for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGPIPE):
+                    signal.signal(signum, signal.SIG_DFL)
+                os.execve(argv[0], argv, environment)
+            except BaseException as error:
+                say("fm-cli-run: could not start %s: %s" % (argv[0], error))
+            os._exit(EXIT_MISSING)
+        return self.wait(pid)
+
+    def run_cli(self, args):
+        identity = resolve_cli()
+        pid = spawn_cli(identity, args, cli_environment())
+        return self.wait(pid)
+
+    def wait(self, pid):
+        self.child = pid
+        try:
+            return wait_child(pid)
+        finally:
+            self.child = None
+
+    def install(self):
+        environment = cli_environment()
+        environment["PATH"] = SESSION_PATH_ENVIRONMENT
+        return self.run_argv([require_tool("omarchy-mise-install"), MISE_PACKAGE, "fm-cli"], environment)
+
+    def sign_in(self):
+        return self.run_cli(["setup", "--silent-success"])
+
+    def steps(self):
+        return ([self.install] if self.mode == "install" else []) + [self.sign_in]
+
+    def report_finished(self):
+        try:
+            argv = [require_tool("omarchy-shell"), "-q", self.target, "setupFinished"]
+        except Refused as problem:
+            say("fm-cli-run: %s" % problem)
+            return
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.execve(argv[0], argv, session_environment())
+            finally:
+                os._exit(1)
+        wait_child(pid, 10)
+
+    def run(self):
+        for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, self.on_signal)
+        lock = open_lock_or_exit()
+        if lock is None:
+            say("Fastmail setup is already running.", 1)
+            return EXIT_BUSY
+        status = 0
+        try:
+            for step in self.steps():
+                if self.stop_status is not None:
+                    break
+                try:
+                    status = step()
+                except (LookupError, Refused) as problem:
+                    say("fm-cli-run: %s" % problem)
+                    status = EXIT_UNTRUSTED
+                if status != 0:
+                    break
+            if self.stop_status is not None:
+                status = self.stop_status
+        finally:
+            for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+                signal.signal(signum, signal.SIG_IGN)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            self.report_finished()
+            os.close(lock)
+        return status
+
+
+def mode_setup(args):
+    if len(args) != 2 or args[0] not in ("install", "signin") or not IPC_TARGET.match(args[1]):
+        return usage()
+    return Setup(args[0], args[1]).run()
+
+
+def usage():
+    say("usage: fm-cli-run probe | exec <fm-cli args...> | open-tui [--thread ID] [--email ID]"
+        " | setup install|signin <ipc-target> | setup-lock-check")
+    return EXIT_USAGE
+
+
+MODES = {
+    "probe": mode_probe,
+    "exec": mode_exec,
+    "open-tui": mode_open_tui,
+    "setup": mode_setup,
+    "setup-lock-check": mode_setup_lock_check,
+}
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] not in MODES:
+        return usage()
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    status = MODES[argv[1]](argv[2:])
+    return 0 if status is None else status
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -11,6 +11,7 @@ shell_config="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
 fixture="$repo_root/demo/fixtures/screenshot.json"
 state_dir=""
 backup_dir=""
+staged_plugin=""
 installed_backup=""
 shell_config_backup="${shell_config}.fm-demo-backup"
 runtime_dir=""
@@ -125,7 +126,7 @@ wait_for_shell() {
 }
 
 wait_for_demo_shell() {
-  local environment path_value
+  local environment
   wait_for_shell || return 1
   demo_shell_pid=$(shell_instances | jq -r 'sort_by(.launch_time) | last | .pid // empty')
   [[ -n $demo_shell_pid && -r /proc/$demo_shell_pid/environ ]] || {
@@ -142,11 +143,32 @@ wait_for_demo_shell() {
     echo "The running shell does not have isolated demo state." >&2
     return 1
   }
-  path_value=$(sed -n 's/^PATH=//p' <<<"$environment")
-  [[ $path_value == "$repo_root/demo/bin:"* ]] || {
-    echo "The demo CLI is not first in the running shell's PATH." >&2
-    return 1
-  }
+}
+
+# The plugin never looks fm-cli up on PATH, so the demo cannot slip its fake
+# CLI in that way. It links a staged copy of this checkout instead, the one
+# place the runner's DEMO_CLI and DEMO_ENV constants are set: this checkout
+# and every real install leave them unset.
+stage_plugin() {
+  mkdir -m 700 "$staged_plugin"
+  (cd "$repo_root" && tar --exclude=./.git -cf - .) | tar -xf - -C "$staged_plugin"
+  python3 - "$staged_plugin/bin/fm-cli-run" "$staged_plugin/demo/bin/fm-cli" \
+    "$fixture" "$demo_state" "$state_dir" <<'PY'
+import json
+import sys
+
+runner, cli, fixture, state, state_dir = sys.argv[1:]
+with open(runner) as handle:
+    source = handle.read()
+environment = {"FM_DEMO_FIXTURE": fixture, "FM_DEMO_STATE": state, "FM_DEMO_STATE_DIR": state_dir}
+for old, new in (("DEMO_CLI = None\n", "DEMO_CLI = %s\n" % json.dumps(cli)),
+                 ("DEMO_ENV = {}\n", "DEMO_ENV = %s\n" % json.dumps(environment))):
+    if source.count(old) != 1:
+        sys.exit("Cannot stage the demo runner: %r is not there exactly once." % old)
+    source = source.replace(old, new)
+with open(runner, "w") as handle:
+    handle.write(source)
+PY
 }
 
 # The kill's exit status is not the signal: the shell can be gone before the
@@ -191,7 +213,7 @@ restore_shell_config() {
 
 restore_plugin() {
   [[ -e $installed_backup ]] || return 0
-  if [[ -L $installed_plugin && $(readlink -f "$installed_plugin") == "$repo_root" ]]; then
+  if [[ -L $installed_plugin && -n $staged_plugin && $(readlink -f "$installed_plugin") == "$staged_plugin" ]]; then
     rm -f "$installed_plugin" || return 1
   elif [[ -e $installed_plugin || -L $installed_plugin ]]; then
     echo "Cannot restore the plugin because $installed_plugin was replaced." >&2
@@ -327,13 +349,15 @@ done
 backup_dir=$(mktemp -d "$runtime_dir/fm-demo.XXXXXX")
 state_dir="$backup_dir/state"
 mkdir -p "$state_dir"
+staged_plugin=$(readlink -f "$backup_dir")/plugin
+stage_plugin
 
 shell_stopped=1
 stop_shell
 
 installed_backup="$plugins_dir/.ninepointlabs.fastmail.demo-backup-$$"
 mv "$installed_plugin" "$installed_backup"
-ln -s "$repo_root" "$installed_plugin"
+ln -s "$staged_plugin" "$installed_plugin"
 
 cp -a "$shell_config" "$shell_config_backup"
 temporary_config="$backup_dir/shell.demo.json"
@@ -341,7 +365,6 @@ jq '.bar.layout.right = [{"id":"ninepointlabs.fastmail"}]' "$shell_config" >"$te
 chmod --reference="$shell_config" "$temporary_config"
 mv "$temporary_config" "$shell_config"
 
-PATH="$repo_root/demo/bin:$PATH" \
 FM_DEMO_FIXTURE="$fixture" \
 FM_DEMO_STATE="$demo_state" \
 FM_DEMO_STATE_DIR="$state_dir" \
