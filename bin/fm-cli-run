@@ -129,6 +129,7 @@ IPC_TARGET = re.compile(r"\A[a-z0-9][a-z0-9._-]{0,63}\Z")
 TUI_APP_ID = "com.ninepointlabs.fm-cli"
 LOCK_BASE_PREFIX = "ninepointlabs.fastmail-"
 LOCK_DIRECTORY = "setup-lock"
+LOCK_CONTENTION_SECONDS = 0.5
 
 EXIT_USAGE = 2
 EXIT_UNTRUSTED = 126
@@ -600,12 +601,18 @@ def setup_lock():
         lock = private_directory(base, LOCK_DIRECTORY)
     finally:
         os.close(base)
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        os.close(lock)
-        return None
-    return lock
+    # `setup-lock-check` probes by taking this same lock for an instant, so a
+    # refusal is only believed once it has lasted longer than any probe could.
+    end = time.monotonic() + LOCK_CONTENTION_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock
+        except BlockingIOError:
+            if time.monotonic() >= end:
+                os.close(lock)
+                return None
+            time.sleep(0.01)
 
 
 def open_lock_or_exit():

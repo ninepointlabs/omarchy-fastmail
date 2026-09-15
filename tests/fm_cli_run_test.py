@@ -336,6 +336,31 @@ class SetupTest(Scratch):
                 os.killpg(first.pid, signal.SIGKILL)
                 first.wait()
 
+    def test_a_lock_probe_does_not_make_setup_report_busy(self):
+        # The panel's setup-lock-check takes the lock for an instant; a setup
+        # starting at that moment must wait it out rather than refuse.
+        probe_source = (
+            "import fcntl, os, sys\n"
+            "while True:\n"
+            "    try:\n"
+            "        fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)\n"
+            "    except OSError:\n"
+            "        continue\n"
+            "    try:\n"
+            "        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "        fcntl.flock(fd, fcntl.LOCK_UN)\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    os.close(fd)\n")
+        probe = subprocess.Popen([PYTHON, "-I", "-S", "-B", "-c", probe_source, self.lock_path()])
+        try:
+            for attempt in range(40):
+                result = run_harness(self.config(["/usr/bin/true"]), "setup", "signin", self.target, env=self.env)
+                self.assertEqual(result.returncode, 0, "attempt %d: %s" % (attempt, result.stdout + result.stderr))
+        finally:
+            probe.kill()
+            probe.wait()
+
 
 if __name__ == "__main__":
     unittest.main()
