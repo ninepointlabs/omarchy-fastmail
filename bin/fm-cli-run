@@ -91,6 +91,7 @@ RUNNER_TOOLS = {
     "omarchy-launch-tui": OMARCHY_DIRECTORIES,
     "omarchy-shell": OMARCHY_DIRECTORIES,
     "omarchy-mise-install": OMARCHY_DIRECTORIES,
+    "mise": TRUSTED_DIRECTORIES,
 }
 
 # What fm-cli reads: its config/cache/runtime directories, the session bus its
@@ -677,16 +678,32 @@ class Setup:
         finally:
             self.child = None
 
-    def install(self):
+    def install_environment(self):
         environment = cli_environment()
         environment["PATH"] = SESSION_PATH_ENVIRONMENT
-        return self.run_argv([require_tool("omarchy-mise-install"), MISE_PACKAGE, "fm-cli"], environment)
+        # The same override the wrapper sets, so mise's release cooldown does
+        # not hold the pinned release back.
+        environment["MISE_MINIMUM_RELEASE_AGE"] = "0"
+        return environment
+
+    def install_wrapper(self):
+        return self.run_argv([require_tool("omarchy-mise-install"), MISE_PACKAGE, "fm-cli"],
+                             self.install_environment())
+
+    def install_release(self):
+        # omarchy-mise-install only writes the ~/.local/bin wrapper, which
+        # installs on its first run. Nothing here runs that wrapper (it is not
+        # a trusted path), so fetch the pinned release into the mise install
+        # directory resolve_cli verifies before sign-in looks for it.
+        return self.run_argv([require_tool("mise"), "install", MISE_PACKAGE],
+                             self.install_environment())
 
     def sign_in(self):
         return self.run_cli(["setup", "--silent-success"])
 
     def steps(self):
-        return ([self.install] if self.mode == "install" else []) + [self.sign_in]
+        install = [self.install_wrapper, self.install_release] if self.mode == "install" else []
+        return install + [self.sign_in]
 
     def report_finished(self):
         try:

@@ -281,6 +281,42 @@ class SetupTest(Scratch):
         self.assertEqual(result.returncode, 3)
         self.assertFalse(os.path.exists(marker))
 
+    def install_tool(self, name, body=""):
+        path = os.path.join(self.tools, name)
+        log = os.path.join(self.scratch, name + ".log")
+        with open(path, "w") as handle:
+            handle.write("#!/bin/sh\nprintf '%%s|%%s\\n' \"$*\" \"$MISE_MINIMUM_RELEASE_AGE\" >>'%s'\n%s" % (log, body))
+        os.chmod(path, 0o755)
+        return log
+
+    def read_log(self, path):
+        with open(path) as handle:
+            return handle.read().splitlines()
+
+    def test_install_fetches_the_pinned_release_before_signing_in(self):
+        # omarchy-mise-install only writes a wrapper; without the mise step the
+        # verified install directory never appears and sign-in finds nothing.
+        installed = os.path.join(self.scratch, ".local", "share", *runner.CLI_MISE_RELATIVE)
+        wrapper_log = self.install_tool("omarchy-mise-install")
+        mise_log = self.install_tool("mise", "mkdir -p '%s'\ncp /usr/bin/true '%s'\n"
+                                     % (os.path.dirname(installed), installed))
+        with open("/usr/bin/true", "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        config = {"tool_directory": self.tools, "package_candidates": [], "pinned_sha256": digest}
+        result = run_harness(config, "setup", "install", self.target, env=self.env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.read_log(wrapper_log), [runner.MISE_PACKAGE + " fm-cli|0"])
+        self.assertEqual(self.read_log(mise_log), ["install " + runner.MISE_PACKAGE + "|0"])
+        self.assertEqual(self.completions(), ["-q ninepointlabs.fastmail setupFinished"])
+
+    def test_install_stops_when_mise_fails(self):
+        self.install_tool("omarchy-mise-install")
+        self.install_tool("mise", "exit 9\n")
+        config = {"tool_directory": self.tools, "package_candidates": []}
+        result = run_harness(config, "setup", "install", self.target, env=self.env)
+        self.assertEqual(result.returncode, 9)
+        self.assertEqual(self.completions(), ["-q ninepointlabs.fastmail setupFinished"])
+
     def test_planted_symlink_lock_is_refused_without_touching_its_target(self):
         base = os.path.dirname(self.lock_path())
         os.mkdir(base, 0o700)
