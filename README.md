@@ -210,6 +210,7 @@ fm-cli-run open-tui [--thread <id>] [--email <id>]              (detached, on a 
 /usr/bin/omarchy-launch-floating-terminal-with-presentation \
     "'/usr/bin/python3' '-I' '-S' '-B' '<plugin>/bin/fm-cli-run' 'setup' 'install|signin' 'ninepointlabs.fastmail'"
     → /usr/bin/omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli   (install only)
+    → /usr/bin/mise install github:ninepointlabs/fm-cli@0.3.0                  (install only)
     → verified fm-cli setup --silent-success
     → /usr/bin/omarchy-shell -q ninepointlabs.fastmail setupFinished
 /usr/bin/wl-copy -- 'fm-cli setup --silent-success'             (detached, copying the setup command)
