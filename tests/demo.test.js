@@ -44,8 +44,8 @@ test("demo CLI fixtures follow the fm-cli scripting contract", () => {
   withState(stateDir => {
     const version = demo(["--version"], stateDir)
     assert.equal(version.status, 0, version.stderr)
-    assert.equal(version.stdout.trim(), "fm-cli version 0.3.0")
-    assert.equal(Model.parseProbe(version.stdout).version, "0.3.0")
+    assert.equal(version.stdout.trim(), "fm-cli version 0.3.3")
+    assert.equal(Model.parseProbe(version.stdout).version, "0.3.3")
     assert.equal(Model.cliVersionTooOld(Model.parseProbe(version.stdout).version), false)
 
     const auth = successfulJson(["auth", "status", "--json"], stateDir)

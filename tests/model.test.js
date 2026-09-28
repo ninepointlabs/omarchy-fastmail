@@ -378,7 +378,7 @@ test("cliTooOld recognizes a CLI that lacks a command, flag, or event", () => {
   assert.equal(Model.cliTooOld('unknown command "seen"', ""), true)
   assert.equal(Model.cliTooOld("", '{"ok":false,"error":"network error","code":"network"}'), false)
   assert.match(Model.cliTooOldMessage, /0\.3\.0/)
-  assert.match(Model.cliTooOldMessage, /omarchy-mise-install github:ninepointlabs\/fm-cli@0\.3\.0 fm-cli/)
+  assert.match(Model.cliTooOldMessage, /omarchy-mise-install github:ninepointlabs\/fm-cli@0\.3\.3 fm-cli/)
   assert.equal(Model.minimumCliVersion, "0.3.0")
 })
 

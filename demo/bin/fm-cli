@@ -14,7 +14,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.3.3"
 WEB_URL = "https://app.fastmail.com"
 WATCH_EVENTS = "added,updated,deleted,new,resync"
 

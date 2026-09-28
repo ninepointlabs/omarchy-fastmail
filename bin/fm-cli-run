@@ -24,11 +24,11 @@
 #      a regular file owned by root, in root-owned directories nobody else can
 #      write. Opened once, checked on the opened descriptor, executed from it.
 #   2. Otherwise the pinned mise install the panel offers:
-#      $XDG_DATA_HOME/mise/installs/github-ninepointlabs-fm-cli/0.3.0/fm-cli
+#      $XDG_DATA_HOME/mise/installs/github-ninepointlabs-fm-cli/0.3.3/fm-cli
 #      (XDG_DATA_HOME defaulting to ~/.local/share). Its path may contain no
 #      symlink, file and directories must be owned by you or root and closed to
 #      group/other writes, and its bytes must match the SHA-256 of the fm-cli
-#      binary in the v0.3.0 release archive for this machine. The bytes are read
+#      binary in the v0.3.3 release archive for this machine. The bytes are read
 #      once, hashed, copied into a sealed memfd and executed from there, so what
 #      runs is exactly what was hashed -- a later write to the file cannot slip
 #      in between the check and the exec.
@@ -51,16 +51,16 @@ import stat
 import sys
 import time
 
-CLI_VERSION = "0.3.0"
+CLI_VERSION = "0.3.3"
 CLI_PACKAGE_CANDIDATES = ("/usr/bin/fm-cli",)
 CLI_MISE_RELATIVE = ("mise", "installs", "github-ninepointlabs-fm-cli", CLI_VERSION, "fm-cli")
-# SHA-256 of the `fm-cli` binary inside fm-cli_0.3.0_linux_<arch>.tar.gz, each
-# archive first checked against the release's checksums.txt:
-#   amd64 archive aaf41daefcfd6150e8b648778a620a6cf4a0818d36001448f742c400be71230b
-#   arm64 archive 7b9df852f028214e2edf4eeee128041a8831649de200f96584f0e8d79f12d4ce
+# SHA-256 of the `fm-cli` binary inside fm-cli_0.3.3_linux_<arch>.tar.gz from
+# the v0.3.3 release, each archive first checked against its checksums.txt:
+#   amd64 archive 7ed5b211a81ba192944f37c32a6cc6b83c39e8986931bc80de870bd74fc77b17
+#   arm64 archive d58f1c6fa82d15c2fb1243679d134378c346ad232a7896d792cb8d688caec015
 CLI_PINNED_SHA256 = {
-    "x86_64": "fc2f0166862e4f816221a6cabdd6abf1ba4a34fb8460fbbe6620f062cbf2aa3e",
-    "aarch64": "b3c87b6817bff5676bb707eb269e781e523f21c46b9aa2251bbb0f53fcb5acb1",
+    "x86_64": "14fc9361c6fe2184bad5c1a094eb5474415673b986cbfd55323a298e0e895dcd",
+    "aarch64": "4f33d8655253b3abbfdb4e294707033885d40a5977db941564be0a8f32205ccd",
 }
 CLI_MAX_BYTES = 64 * 1024 * 1024
 MISE_PACKAGE = "github:ninepointlabs/fm-cli@" + CLI_VERSION

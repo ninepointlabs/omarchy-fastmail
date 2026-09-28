@@ -40,8 +40,8 @@ client for Fastmail, which the panel installs for you.
 
 - Omarchy with Quickshell plugin support.
 - A Fastmail account.
-- fm-cli 0.3.0: the `fm-cli` package, or the pinned release the panel installs
-  for you if it is missing.
+- fm-cli 0.3.0 or newer: the `fm-cli` package, or the pinned 0.3.3 release the
+  panel installs for you if it is missing.
 - The system `python3` (`/usr/bin/python3`, standard library only), which
   Omarchy already ships. The plugin's two small helpers in `bin/` run on it.
 
@@ -54,7 +54,7 @@ omarchy plugin add https://github.com/ninepointlabs/omarchy-fastmail.git --enabl
 Click the envelope in the bar. The panel checks for fm-cli:
 
 1. **Install fm-cli…** appears when it is missing. It opens a floating
-   terminal that installs the pinned 0.3.0 release through mise, checks it
+   terminal that installs the pinned 0.3.3 release through mise, checks it
    against the release's published binary, then goes straight into sign-in.
    If you install the `fm-cli` package instead, the plugin uses that.
 2. **Sign in to Fastmail…** appears when fm-cli is there but signed out. It
@@ -175,10 +175,10 @@ launchers), and only the variables fm-cli or the desktop needs — `HOME`, the
      regular file owned by root, in root-owned directories nobody else can
      write; it is opened once and executed from that descriptor.
   2. Otherwise the pinned mise install,
-     `~/.local/share/mise/installs/github-ninepointlabs-fm-cli/0.3.0/fm-cli`.
+     `~/.local/share/mise/installs/github-ninepointlabs-fm-cli/0.3.3/fm-cli`.
      No symlink may appear on that path, every entry must be yours or root's
      and closed to group and other writes, and the file's SHA-256 must match
-     the `fm-cli` binary in the v0.3.0 release archive for your architecture
+     the `fm-cli` binary in the v0.3.3 release archive for your architecture
      (the archives themselves checked against the release's `checksums.txt`).
      The bytes are read once, hashed, copied into a sealed in-memory file and
      executed from it, so what runs is exactly what was checked.
@@ -209,8 +209,8 @@ fm-cli-run open-tui [--thread <id>] [--email <id>]              (detached, on a 
 /usr/bin/omarchy-launch-webapp <url> | /usr/bin/xdg-open <url>  (detached, on a click)
 /usr/bin/omarchy-launch-floating-terminal-with-presentation \
     "'/usr/bin/python3' '-I' '-S' '-B' '<plugin>/bin/fm-cli-run' 'setup' 'install|signin' 'ninepointlabs.fastmail'"
-    → /usr/bin/omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli   (install only)
-    → /usr/bin/mise install github:ninepointlabs/fm-cli@0.3.0                  (install only)
+    → /usr/bin/omarchy-mise-install github:ninepointlabs/fm-cli@0.3.3 fm-cli   (install only)
+    → /usr/bin/mise install github:ninepointlabs/fm-cli@0.3.3                  (install only)
     → verified fm-cli setup --silent-success
     → /usr/bin/omarchy-shell -q ninepointlabs.fastmail setupFinished
 /usr/bin/wl-copy -- 'fm-cli setup --silent-success'             (detached, copying the setup command)

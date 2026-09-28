@@ -168,8 +168,11 @@ function shellCommand(command) {
 // the flow's own status so Omarchy's presentation honors Ctrl-C (exit 130).
 // The terminal launcher evaluates the one string it is given, so that string
 // is nothing but single-quoted fixed words and verified paths.
+// The minimum is the oldest fm-cli the plugin can talk to; the pinned release
+// is what setup installs and must match CLI_VERSION in bin/fm-cli-run.
 var minimumCliVersion = "0.3.0"
-var installCommand = "omarchy-mise-install github:ninepointlabs/fm-cli@" + minimumCliVersion + " fm-cli"
+var pinnedCliVersion = "0.3.3"
+var installCommand = "omarchy-mise-install github:ninepointlabs/fm-cli@" + pinnedCliVersion + " fm-cli"
 var setupCommand = "fm-cli setup --silent-success"
 var ipcTargetPattern = /^[a-z0-9][a-z0-9._-]{0,63}$/
 

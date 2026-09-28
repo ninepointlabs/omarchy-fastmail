@@ -97,9 +97,9 @@ TestCase {
   // What `fm-cli-run probe` prints for a verified CLI: the trusted helpers,
   // the identity, the version, the auth status.
   readonly property string probeTools: 'tools {"omarchy-launch-floating-terminal-with-presentation":"/usr/bin/omarchy-launch-floating-terminal-with-presentation","omarchy-launch-webapp":"/usr/bin/omarchy-launch-webapp","omarchy-notification-send":"/usr/bin/omarchy-notification-send","wl-copy":"/usr/bin/wl-copy","xdg-open":"/usr/bin/xdg-open"}\n'
-  readonly property string probeIdentity: 'identity {"path":"/home/tester/.local/share/mise/installs/github-ninepointlabs-fm-cli/0.3.0/fm-cli","source":"mise"}\n'
-  readonly property string signedInProbe: probeTools + probeIdentity + 'fm-cli version 0.3.0\n{"ok":true,"data":{"authenticated":true,"auth_type":"oauth","username":"tim@example.com"}}'
-  readonly property string signedOutProbe: probeTools + probeIdentity + 'fm-cli version 0.3.0\n{"ok":true,"data":{"authenticated":false,"auth_type":"none","username":""}}'
+  readonly property string probeIdentity: 'identity {"path":"/home/tester/.local/share/mise/installs/github-ninepointlabs-fm-cli/0.3.3/fm-cli","source":"mise"}\n'
+  readonly property string signedInProbe: probeTools + probeIdentity + 'fm-cli version 0.3.3\n{"ok":true,"data":{"authenticated":true,"auth_type":"oauth","username":"tim@example.com"}}'
+  readonly property string signedOutProbe: probeTools + probeIdentity + 'fm-cli version 0.3.3\n{"ok":true,"data":{"authenticated":false,"auth_type":"none","username":""}}'
   readonly property var trustedTools: ({
     "omarchy-launch-webapp": "/usr/bin/omarchy-launch-webapp",
     "omarchy-notification-send": "/usr/bin/omarchy-notification-send",
@@ -423,7 +423,7 @@ TestCase {
     beginRefresh()
     findProbeProcess().complete(0, 'fm-cli version 0.2.9\n{"ok":true,"data":{"authenticated":true}}', "")
     compare(service.cliOutdated, true)
-    compare(service.lastError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli)")
+    compare(service.lastError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.3 fm-cli)")
     verify(findWatchProcess() === null || !findWatchProcess().running)
     // The panel still reads on the timer, degraded.
     verify(findCliProcess("account").running)
@@ -907,7 +907,7 @@ TestCase {
     service.settings = { notify: true }
     service.toastDebounceMs = 0
     beginRefresh()
-    findProbeProcess().complete(0, 'tools {}\n' + probeIdentity + 'fm-cli version 0.3.0\n{"ok":true,"data":{"authenticated":true}}', "")
+    findProbeProcess().complete(0, 'tools {}\n' + probeIdentity + 'fm-cli version 0.3.3\n{"ok":true,"data":{"authenticated":true}}', "")
     findCliProcess("account").complete(0, oneAccount, "")
     findCliProcess("box").complete(0, emptyInbox, "")
     findWatchProcess().emitLine(newLunchLine)
@@ -918,7 +918,7 @@ TestCase {
   function test_an_untrusted_cli_runs_nothing_and_says_why() {
     service.notifications = [{ id: "old", unread: true }]
     beginRefresh()
-    findProbeProcess().complete(0, probeTools + 'untrusted {"reason":"/home/tester/.local/share/mise/installs/github-ninepointlabs-fm-cli/0.3.0/fm-cli does not match the fm-cli 0.3.0 release"}\n', "")
+    findProbeProcess().complete(0, probeTools + 'untrusted {"reason":"/home/tester/.local/share/mise/installs/github-ninepointlabs-fm-cli/0.3.3/fm-cli does not match the fm-cli 0.3.3 release"}\n', "")
 
     compare(service.cliUntrusted, true)
     compare(service.installed, true)
@@ -1133,7 +1133,7 @@ TestCase {
     var watch = findWatchProcess()
 
     watch.complete(1, "", '{"ok":false,"error":"unknown command \\"watch\\"","code":"usage"}')
-    compare(service.lastError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli)")
+    compare(service.lastError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.3 fm-cli)")
     compare(service.watchRestartScheduled, false)
   }
 
@@ -1144,8 +1144,8 @@ TestCase {
     // A CLI with watch but no `new` event refuses the command up front,
     // rather than running a watch that never says which threads are new.
     watch.complete(1, "", '{"ok":false,"error":"unknown event \\"new\\"","code":"usage"}')
-    compare(service.lastError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli)")
-    compare(service.watchError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli)")
+    compare(service.lastError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.3 fm-cli)")
+    compare(service.watchError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.3 fm-cli)")
     compare(service.watchRestartScheduled, false)
   }
 
@@ -1180,7 +1180,7 @@ TestCase {
     beginRefresh()
     findProbeProcess().complete(0, signedInProbe, "")
     findCliProcess("account").complete(1, "", '{"ok":false,"error":"unknown command \\"account\\"","code":"usage"}')
-    compare(service.lastError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli)")
+    compare(service.lastError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.3 fm-cli)")
     compare(service.refreshing, false)
     compare(findCliProcess("box"), null)
   }
@@ -1188,7 +1188,7 @@ TestCase {
   function test_box_reports_an_old_cli() {
     var box = refreshToBox()
     box.complete(1, "", '{"ok":false,"error":"unknown flag \\"--account\\"","code":"usage"}')
-    compare(service.lastError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.0 fm-cli)")
+    compare(service.lastError, "fm-cli 0.3.0 or newer is required (omarchy-mise-install github:ninepointlabs/fm-cli@0.3.3 fm-cli)")
     compare(service.refreshing, false)
   }
 
