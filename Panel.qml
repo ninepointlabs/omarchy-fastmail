@@ -23,6 +23,9 @@ Panel {
   property string stateFilter: "unread"
   property bool settingsOpen: false
   property bool pendingSettingsOpen: false
+  // The About page (AboutPage.qml): the info button, `I`, or the `about` IPC
+  // call. Closing the panel resets it.
+  property bool aboutOpen: false
 
   readonly property var clickActionOptions: [
     { value: "app", label: "Web app window" },
@@ -233,6 +236,28 @@ Panel {
     pageFlip.restart()
   }
 
+  function setAbout(on) {
+    if (on) {
+      pageFlip.stop()
+      cardRotation.angle = 0
+      settingsOpen = false
+      pendingSettingsOpen = false
+      accountDropdown.close()
+      openActionDropdown.close()
+      foldersDropdown.close()
+      aboutPage.reset()
+      aboutFlick.contentY = 0
+    }
+    aboutOpen = on === true
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  // The `about` IPC call: open the panel straight onto About.
+  function showAboutPage() {
+    if (!opened) open()
+    setAbout(true)
+  }
+
   property var avatarPalette: []
 
   function avatarColor(item) {
@@ -311,6 +336,7 @@ Panel {
       pageFlip.stop()
       settingsOpen = false
       pendingSettingsOpen = false
+      aboutOpen = false
       cardRotation.angle = 0
       return
     }
@@ -461,6 +487,8 @@ Panel {
     // Scripted views for the demo's screenshots: the settings side, and a
     // folder chip selection. Same-user IPC, no more than a click can do.
     function showSettings(open: bool): string { root.showSettings(open === true); return "ok" }
+    // Opens the panel on its About page: version, license, support, privacy.
+    function about(): void { root.showAboutPage() }
     function selectFolder(id: string): string {
       service.setFolderFilter(Model.validId(id))
       root.resetFilteredView()
@@ -524,7 +552,9 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(430))
-    contentHeight: panel.fittedContentHeight(root.settingsOpen
+    contentHeight: panel.fittedContentHeight(root.aboutOpen
+      ? aboutHeader.implicitHeight + aboutPage.implicitHeight + Style.space(24)
+      : root.settingsOpen
       ? settingsHeader.implicitHeight + settingsContent.implicitHeight + Style.space(24)
       : fixedContent.implicitHeight + notificationContent.implicitHeight + Style.space(12), Style.space(600))
 
@@ -535,19 +565,22 @@ Panel {
       // Escape handler below returns to email after an open dropdown closes.
       blocked: root.settingsOpen || accountDropdown.popupOpen || openActionDropdown.popupOpen || foldersDropdown.popupOpen
       onMoveRequested: function(dx, dy) {
-        if (root.settingsOpen) return
+        if (root.settingsOpen || root.aboutOpen) return
         if (dx !== 0) root.cycleAccountFilter(dx)
         else if (dy !== 0) root.moveSelection(dy)
       }
-      onActivateRequested: if (!root.settingsOpen) root.activateSelection()
+      onActivateRequested: if (!root.settingsOpen && !root.aboutOpen) root.activateSelection()
       onCloseRequested: {
         if (root.settingsOpen) root.showSettings(false)
+        else if (root.aboutOpen) root.setAbout(false)
         else root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
         if (root.settingsOpen) return
-        if (text === "r" || text === "R") service.refresh()
+        if (text === "i" || text === "I") root.setAbout(!root.aboutOpen)
+        else if (root.aboutOpen) return
+        else if (text === "r" || text === "R") service.refresh()
         else if (text === "u" || text === "U") root.setStateFilter("unread")
         else if (text === "p" || text === "P") root.setStateFilter("previous")
         else if (text === "n" || text === "N") root.toggleNotify()
@@ -566,7 +599,7 @@ Panel {
       ColumnLayout {
         id: content
         anchors.fill: parent
-        visible: !root.settingsOpen
+        visible: !root.settingsOpen && !root.aboutOpen
         spacing: Style.space(12)
 
         Column {
@@ -590,8 +623,8 @@ Panel {
               id: heroLabels
               anchors.left: heroIcon.right
               anchors.leftMargin: Style.space(14)
-              anchors.right: root.missingCli ? parent.right : settingsButton.left
-              anchors.rightMargin: root.missingCli ? 0 : Style.space(12)
+              anchors.right: aboutButton.left
+              anchors.rightMargin: Style.space(12)
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(3)
 
@@ -614,6 +647,19 @@ Panel {
                 font.pixelSize: Style.font.bodySmall
                 elide: Text.ElideRight
               }
+            }
+
+            PanelActionButton {
+              id: aboutButton
+              objectName: "aboutButton"
+              anchors.right: root.missingCli ? parent.right : settingsButton.left
+              anchors.rightMargin: root.missingCli ? 0 : Style.space(4)
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰋽"
+              tooltipText: "About (I)"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.setAbout(true)
             }
 
             PanelActionButton {
@@ -1275,6 +1321,79 @@ Panel {
                 wrapMode: Text.Wrap
               }
             }
+          }
+        }
+      }
+
+      ColumnLayout {
+        id: aboutPageLayout
+        objectName: "aboutPageLayout"
+        anchors.fill: parent
+        visible: root.aboutOpen
+        spacing: Style.space(12)
+
+        Column {
+          id: aboutHeader
+          Layout.fillWidth: true
+          spacing: Style.space(12)
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(aboutBackButton.implicitHeight, aboutTitle.implicitHeight)
+
+            PanelActionButton {
+              id: aboutBackButton
+              objectName: "aboutBack"
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰁍"
+              tooltipText: "Back to email (Esc)"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.setAbout(false)
+            }
+
+            Text {
+              id: aboutTitle
+              anchors.left: aboutBackButton.right
+              anchors.leftMargin: Style.space(10)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: "ABOUT"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+          }
+
+          PanelSeparator {
+            foreground: root.foreground
+          }
+        }
+
+        Flickable {
+          id: aboutFlick
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          contentWidth: width
+          contentHeight: aboutPage.implicitHeight
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          flickableDirection: Flickable.VerticalFlick
+          interactive: contentHeight > height
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          AboutPage {
+            id: aboutPage
+            width: aboutFlick.width
+            pluginDir: Model.fileUrlPath(Qt.resolvedUrl("."))
+            cliVersion: service.cliVersion
+            mailLauncher: Model.toolPath(service.tools, "xdg-open")
+            sessionEnvironment: service.sessionEnvironment
+            foreground: root.foreground
+            accent: Color.accent
+            fontFamily: root.fontFamily
           }
         }
       }

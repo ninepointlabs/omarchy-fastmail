@@ -27,6 +27,9 @@ Item {
   // the Inbox on the timer, but no watch runs — an old watch may say neither
   // ready nor which threads are new — and the header says to upgrade.
   property bool cliOutdated: false
+  // The version the last probe read from `fm-cli --version`, for the About
+  // page; "" when fm-cli is missing or did not say.
+  property string cliVersion: ""
   property bool authenticated: true
   property bool probed: false
   property bool setupRunning: false
@@ -278,6 +281,7 @@ Item {
     var errorText = String(stderr || "")
     var probe = Model.parseProbe(text)
     tools = probe.tools
+    cliVersion = probe.version
     cliUntrusted = probe.state === "untrusted"
     if (probe.state === "missing") {
       installed = false
