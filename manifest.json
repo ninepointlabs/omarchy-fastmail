@@ -3,7 +3,7 @@
   "id": "ninepointlabs.fastmail",
   "name": "Fastmail",
   "version": "0.1.0",
-  "author": "Ninepoint Labs",
+  "author": "Nine Point Labs",
   "license": "MIT",
   "description": "Unread email from your Fastmail Inbox and the folders your rules file into, live over JMAP push, with new-mail notifications \u2014 through fm-cli.",
   "kinds": [

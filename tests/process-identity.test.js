@@ -38,7 +38,7 @@ function everyCommand(ctx, table) {
 }
 
 test("no plugin source runs a shell, setpriv, a login shell, or a bare program name", () => {
-  for (const name of ["Model.js", "Service.qml", "Panel.qml", "MailIcon.qml", "PlainTextDropdown.qml"]) {
+  for (const name of ["Model.js", "Service.qml", "Panel.qml", "MailIcon.qml", "PlainTextDropdown.qml", "About.js", "AboutPage.qml"]) {
     const text = source(name)
     assert.doesNotMatch(text, /["']bash["']|bash -c|-lc\b|["']sh["']/, `${name} starts a shell`)
     assert.doesNotMatch(text, /["']setpriv["']|["']fm-cli["']\s*,/, `${name} names a program without a path`)
@@ -54,7 +54,7 @@ test("every Process clears the inherited environment and gets a closed one", () 
     assert.match(block, /\n    clearEnvironment: true\n/)
     assert.match(block, /\n    environment: root\.(cli|session)Environment\n/)
   }
-  for (const name of ["Service.qml", "Panel.qml"]) {
+  for (const name of ["Service.qml", "Panel.qml", "AboutPage.qml"]) {
     const detached = source(name).match(/Quickshell\.execDetached\([^\n]*/g) || []
     assert.ok(detached.length > 0)
     for (const call of detached) assert.match(call, /clearEnvironment: true/, call)

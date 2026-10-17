@@ -435,12 +435,15 @@ TestCase {
     compare(service.cliOutdated, false)
     compare(service.lastError, "")
     verify(findWatchProcess().running)
+    // The About page shows the version the probe read; no extra process.
+    compare(service.cliVersion, "0.3.3")
   }
 
   function test_probe_without_a_version_line_is_not_held_against_the_cli() {
     beginRefresh()
     findProbeProcess().complete(0, '{"ok":true,"data":{"authenticated":true}}', "")
     compare(service.cliOutdated, false)
+    compare(service.cliVersion, "")
     verify(findWatchProcess().running)
   }
 

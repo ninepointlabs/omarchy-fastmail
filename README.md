@@ -35,6 +35,13 @@ client for Fastmail, which the panel installs for you.
   applies. A click on the toast opens the message wherever you chose above.
 - **Handles several accounts**, with a dropdown that shows the unread count
   per account.
+- **About**: the 󰋽 button in the panel header (or `I` with the panel open,
+  or `omarchy-shell ninepointlabs.fastmail about`) shows the version, the
+  license and third-party notices (readable in place), Nine Point Labs, what
+  the plugin does with your data, and the support address,
+  [help@ninepointlabs.com](mailto:help@ninepointlabs.com), with **Email**,
+  **Copy** and **Copy version details** buttons. `Esc` or the back arrow
+  returns to your mail.
 
 ## Requirements
 
@@ -118,8 +125,9 @@ With the panel open:
 | `U` | Show new email |
 | `P` | Show previously seen email |
 | `N` | Toggle notifications |
+| `I` | About |
 | `R` | Refresh |
-| `Esc` | Close settings, then the panel |
+| `Esc` | Close settings or About, then the panel |
 | `Tab` `Shift+Tab` | Switch to the next or previous bar panel |
 
 ## Notifications
@@ -207,6 +215,7 @@ fm-cli-run open-tui [--thread <id>] [--email <id>]              (detached, on a 
     → /usr/bin/omarchy-launch-or-focus com.ninepointlabs.fm-cli
         '/usr/bin/omarchy-launch-tui' '--app-id=com.ninepointlabs.fm-cli' '/usr/bin/python3' … 'fm-cli-run' 'exec' 'tui' …
 /usr/bin/omarchy-launch-webapp <url> | /usr/bin/xdg-open <url>  (detached, on a click)
+/usr/bin/xdg-open mailto:help@ninepointlabs.com?…              (detached, About's Email button)
 /usr/bin/omarchy-launch-floating-terminal-with-presentation \
     "'/usr/bin/python3' '-I' '-S' '-B' '<plugin>/bin/fm-cli-run' 'setup' 'install|signin' 'ninepointlabs.fastmail'"
     → /usr/bin/omarchy-mise-install github:ninepointlabs/fm-cli@0.3.3 fm-cli   (install only)
@@ -245,6 +254,10 @@ runner is pointed at the fake; the checkout itself is left untouched. Tests:
 ```bash
 ./tests/run      # runner and supervisor tests, node tests for the model and demo, QML tests for the service
 ```
+
+`tests/about.test.js` checks the About page's facts against the real
+`manifest.json`, `LICENSE` and first commit, and fails if the code names a
+network host that the privacy statement does not.
 
 ## Updating and removal
 
